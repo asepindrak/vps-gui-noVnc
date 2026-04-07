@@ -1,7 +1,8 @@
 #!/bin/bash
-# VPS GUI + XFCE + x11vnc + NoVNC Auto Install (Headless)
+# Auto Install XFCE + x11vnc + NoVNC dengan Systemd
 # User VPS: getechindonesia
 # VNC Password: Qwertieser123!@
+# Display virtual otomatis :1
 
 set -e
 
@@ -14,27 +15,29 @@ NOVNC_PORT="6080"
 echo "=== Update & Upgrade System ==="
 sudo apt update && sudo apt upgrade -y
 
-echo "=== Install XFCE Desktop + Xvfb + x11vnc + NoVNC ==="
-sudo apt install -y xfce4 xfce4-goodies xvfb x11vnc novnc websockify
+echo "=== Install Desktop & VNC Packages ==="
+sudo apt install -y xfce4 xfce4-goodies x11vnc novnc websockify xvfb dbus-x11
 
 echo "=== Set VNC Password ==="
 mkdir -p /home/$USER/.vnc
-x11vnc -storepasswd $VNC_PASS /home/$USER/.vnc/passwd
+echo $VNC_PASS | x11vnc -storepasswd -f /home/$USER/.vnc/passwd
 chown -R $USER:$USER /home/$USER/.vnc
 chmod 600 /home/$USER/.vnc/passwd
 
-echo "=== Create systemd service for Xvfb + XFCE ==="
+echo "=== Create systemd service for XFCE on Xvfb ==="
 sudo tee /etc/systemd/system/xfce-vps.service > /dev/null <<EOF
 [Unit]
 Description=Start XFCE Desktop on virtual display
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+Type=forking
 User=$USER
 Environment=DISPLAY=$DISPLAY_NUM
+ExecStartPre=/usr/bin/Xvfb $DISPLAY_NUM -screen 0 1280x720x24
 ExecStart=/usr/bin/startxfce4
-Restart=on-failure
+Restart=always
 
 [Install]
 WantedBy=multi-user.target
@@ -51,7 +54,7 @@ Requires=xfce-vps.service
 Type=simple
 User=$USER
 Environment=DISPLAY=$DISPLAY_NUM
-ExecStart=/usr/bin/x11vnc -display $DISPLAY_NUM -rfbauth /home/$USER/.vnc/passwd -forever -shared -nopw -bg
+ExecStart=/usr/bin/x11vnc -display $DISPLAY_NUM -rfbauth /home/$USER/.vnc/passwd -forever -shared -bg -o /home/$USER/x11vnc.log
 Restart=on-failure
 
 [Install]
@@ -68,8 +71,7 @@ Requires=x11vnc.service
 [Service]
 Type=simple
 User=$USER
-Environment=DISPLAY=$DISPLAY_NUM
-ExecStart=/usr/bin/websockify --web=/usr/share/novnc/ $NOVNC_PORT 0.0.0.0:$VNC_PORT --password=$VNC_PASS
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc/ $NOVNC_PORT localhost:$VNC_PORT --password=$VNC_PASS
 Restart=on-failure
 
 [Install]
@@ -86,10 +88,10 @@ echo "=== Start Services ==="
 sudo systemctl start xfce-vps.service
 sleep 5
 sudo systemctl start x11vnc.service
-sleep 5
+sleep 2
 sudo systemctl start novnc.service
 
 echo "=== Setup Complete ==="
 echo "VNC Server: $VNC_PORT"
-echo "NoVNC Web URL: http://$(curl -s ifconfig.me):$NOVNC_PORT"
+echo "NoVNC Web URL: http://<YOUR_VPS_IP>:$NOVNC_PORT"
 echo "Password: $VNC_PASS"
