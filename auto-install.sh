@@ -305,29 +305,30 @@ if [ "$USE_EXISTING_DISPLAY" = true ]; then
 [Unit]
 Description=Remote Desktop Service (x11vnc + noVNC) - Existing Display Mode
 After=network.target
-After=graphical.target
+PartOf=graphical-session.target
+Wants=graphical-session.target
 
 [Service]
 Type=simple
 User=$TARGET_USER
-Environment="DISPLAY=$DISPLAY_NUM"
+Environment="DISPLAY=:0"
 Environment="XAUTHORITY=$USER_HOME/.Xauthority"
 Environment="SSH_ASKPASS="
 Environment="SSH_ASKPASS_REQUIRE=never"
 Environment="GNOME_KEYRING_CONTROL="
 WorkingDirectory=$USER_HOME
 
-ExecStart=/bin/bash -c 'x11vnc -display $DISPLAY_NUM -forever -shared -nopw -rfbport 5900 & sleep 2 && websockify --web=/usr/share/novnc/ 6080 localhost:5900'
+# Wait for X server to be fully ready, then start x11vnc
+ExecStartPre=/bin/sleep 3
+ExecStart=/bin/bash -c 'x11vnc -display :0 -forever -shared -nopw -rfbport 5900 & sleep 2 && websockify --web=/usr/share/novnc/ 6080 localhost:5900'
 
 Restart=on-failure
 RestartSec=10
 MemoryMax=512M
 MemoryHigh=256M
-NoNewPrivileges=true
-PrivateTmp=true
 
 [Install]
-WantedBy=graphical.target
+WantedBy=graphical-session.target
 EOL
 else
     # Full service for virtual display with Xvfb + XFCE

@@ -51,6 +51,19 @@ fi
 USER_HOME="/home/$TARGET_USER"
 VNC_DIR="$USER_HOME/.vnc"
 
+# Auto-detect display mode (same logic as auto-install.sh)
+if ps aux | grep -q '[X]org' || ps aux | grep -q '[w]ayland'; then
+    # Detected running X server or Wayland on :0
+    DISPLAY_NUM=":0"
+    USE_EXISTING_DISPLAY=true
+    DISPLAY_MODE="EXISTING (POP OS/Ubuntu Desktop)"
+else
+    # Virtual display mode for headless servers
+    DISPLAY_NUM=":1"
+    USE_EXISTING_DISPLAY=false
+    DISPLAY_MODE="VIRTUAL (Headless Server)"
+fi
+
 # Helper functions
 check_pass() {
     echo -e "${GREEN}✅ $1${NC}"
@@ -76,6 +89,8 @@ section() {
 
 section "🔍 VPS GUI System Health Check"
 echo "Checking user: ${BLUE}$TARGET_USER${NC}"
+echo "Display mode: ${MAGENTA}$DISPLAY_MODE${NC}"
+echo "Display number: ${MAGENTA}$DISPLAY_NUM${NC}"
 echo ""
 
 # ============================================================================
@@ -148,18 +163,30 @@ fi
 
 section "3️⃣  RUNNING PROCESSES STATUS"
 
-# Xvfb
-if pgrep -f "Xvfb.*:1" > /dev/null; then
-    check_pass "Xvfb (Virtual Display :1) is running"
+# Xvfb - only check if in virtual display mode
+if [ "$USE_EXISTING_DISPLAY" = true ]; then
+    check_warn "Xvfb not needed (using existing display :0)"
 else
-    check_fail "Xvfb is NOT running"
+    if pgrep -f "Xvfb.*:1" > /dev/null; then
+        check_pass "Xvfb (Virtual Display :1) is running"
+    else
+        check_fail "Xvfb is NOT running"
+    fi
 fi
 
-# XFCE
-if pgrep -f "startxfce4|xfdesktop" > /dev/null; then
-    check_pass "XFCE is running"
+# XFCE - only check if in virtual display mode
+if [ "$USE_EXISTING_DISPLAY" = true ]; then
+    if pgrep -f "startxfce4|xfdesktop" > /dev/null; then
+        check_pass "XFCE is running (using existing desktop)"
+    else
+        check_warn "XFCE not running (may be using external desktop)"
+    fi
 else
-    check_fail "XFCE is NOT running"
+    if pgrep -f "startxfce4|xfdesktop" > /dev/null; then
+        check_pass "XFCE is running"
+    else
+        check_fail "XFCE is NOT running"
+    fi
 fi
 
 # x11vnc
@@ -231,10 +258,10 @@ fi
 
 section "6️⃣  DISPLAY SERVER STATUS"
 
-if DISPLAY=:1 xdpyinfo &>/dev/null; then
-    check_pass "X Server (:1) is responding"
+if DISPLAY="$DISPLAY_NUM" xdpyinfo &>/dev/null; then
+    check_pass "X Server ($DISPLAY_NUM) is responding"
 else
-    check_fail "X Server (:1) is NOT responding"
+    check_fail "X Server ($DISPLAY_NUM) is NOT responding"
 fi
 
 # ============================================================================
