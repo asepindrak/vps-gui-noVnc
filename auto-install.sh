@@ -423,28 +423,28 @@ xhost +SI:localuser:$TARGET_USER 2>/dev/null || true
 xhost +local: 2>/dev/null || true
 
 # Start x11vnc with robust options for existing display
-# -auth \$XAUTHORITY: Use the detected authority file
+# -auth $XAUTHORITY: Use the detected authority file
 # -noxrecord -noxfixes: Required for some GNOME sessions
 # -noxdamage: Fixes refresh issues
-# -ncache 0: Important! Fixing BadMatch (invalid parameter attributes)
-X11VNC_BIN=\$(command -v x11vnc || echo "/usr/bin/x11vnc")
-WEBSOCKIFY_BIN=\$(command -v websockify || echo "/usr/bin/websockify")
-
-log_wait "Starting x11vnc using \$X11VNC_BIN..."
-\$X11VNC_BIN -display $DISPLAY_NUM \\
-    -auth "\${XAUTHORITY:-guess}" \\
+# -noxshm: IMPORTANT! Fixing BadMatch (invalid parameter attributes) on X_GetImage
+# -noxinerama: For single/multiple display compatibility
+# -solid: Improve GNOME desktop compatibility
+log_wait "Starting x11vnc using $X11VNC_BIN..."
+$X11VNC_BIN -display $DISPLAY_NUM \\
+    -auth "${XAUTHORITY:-guess}" \\
     -forever \\
     -shared \\
     -nopw \\
     -rfbport 5900 \\
     -allow localhost \\
     -xkb \\
-    -nowf \\
+    -noxshm \\
     -noxdamage \\
     -noxrecord \\
     -noxfixes \\
     -noxinerama \\
-    -ncache 0 \\
+    -solid \\
+    -nowf \\
     -logfile /tmp/x11vnc-existing.log &
 
 X11VNC_PID=\$!
