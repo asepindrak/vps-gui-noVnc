@@ -86,28 +86,52 @@ detect_os() {
 # DISPLAY DETECTION (Improved)
 # ============================================================================
 detect_display() {
-    # Check for running X server on :0
-    if DISPLAY=:0 xdpyinfo &>/dev/null 2>&1; then
-        DISPLAY_NUM=":0"
+    # 1. Try to get DISPLAY from target user's session via loginctl (Most reliable for existing desktop)
+    if [ -n "$TARGET_USER" ]; then
+        USER_SESSIONS=$(loginctl list-sessions --no-legend | awk '{print $1}') 2>/dev/null
+        for SESSION_ID in $USER_SESSIONS; do
+            SESSION_USER=$(loginctl show-session $SESSION_ID -p User --value)
+            if [ "$SESSION_USER" = "$TARGET_USER" ]; then
+                SESSION_DISPLAY=$(loginctl show-session $SESSION_ID -p Display --value)
+                if [ -n "$SESSION_DISPLAY" ]; then
+                    DISPLAY_NUM="$SESSION_DISPLAY"
+                    USE_EXISTING_DISPLAY=true
+                    log_warn "Detected existing X server from user session ($TARGET_USER) on $DISPLAY_NUM - Using EXISTING DISPLAY mode"
+                    return 0
+                fi
+            fi
+        done
+    fi
+
+    # 2. Check /tmp/.X11-unix/ for sockets (Sorted reverse to pick user session over login screen)
+    # Most desktop users are on :1, login screen is on :0
+    for socket in $(ls /tmp/.X11-unix/X* 2>/dev/null | sort -r); do
+        if [ -S "$socket" ]; then
+            num="${socket#/tmp/.X11-unix/X}"
+            DISPLAY_NUM=":$num"
+            # Quick check if this display responds to xauth (means it's likely the right one)
+            if DISPLAY=$DISPLAY_NUM xauth list &>/dev/null || DISPLAY=$DISPLAY_NUM xauth info &>/dev/null; then
+                 USE_EXISTING_DISPLAY=true
+                 log_warn "Detected existing X server socket on $DISPLAY_NUM - Using EXISTING DISPLAY mode"
+                 return 0
+            fi
+        fi
+    done
+
+    # 3. Try to get DISPLAY from environment (Only if not :0)
+    if [ -n "$DISPLAY" ] && [ "$DISPLAY" != ":0" ]; then
+        DISPLAY_NUM="$DISPLAY"
         USE_EXISTING_DISPLAY=true
-        log_warn "Detected existing X server on :0 - Using EXISTING DISPLAY mode (POP OS/Ubuntu Desktop)"
+        log_warn "Detected existing X server from environment on $DISPLAY_NUM - Using EXISTING DISPLAY mode"
         return 0
     fi
-    
-    # Check for Wayland session
-    if loginctl show-session $(loginctl | grep $(whoami) | awk '{print $1}') -p Type 2>/dev/null | grep -q wayland; then
-        DISPLAY_NUM=":0"
-        USE_EXISTING_DISPLAY=true
-        log_warn "Detected Wayland session - Using EXISTING DISPLAY mode (may need XWayland)"
-        return 0
-    fi
-    
-    # Check for Xorg/Wayland processes
-    if ps aux | grep -q '[X]org' || ps aux | grep -q '[w]ayland'; then
-        DISPLAY_NUM=":0"
-        USE_EXISTING_DISPLAY=true
-        log_warn "Detected display server process - Using EXISTING DISPLAY mode"
-        return 0
+
+    # 4. Final fallback for :0 if socket exists but xauth failed (might need manual xhost)
+    if [ -S /tmp/.X11-unix/X0 ]; then
+         DISPLAY_NUM=":0"
+         USE_EXISTING_DISPLAY=true
+         log_warn "Detected :0 socket - Using EXISTING DISPLAY mode (fallback)"
+         return 0
     fi
     
     # Default to virtual display for headless
@@ -117,12 +141,45 @@ detect_display() {
     return 0
 }
 
+# Improved XAUTHORITY detection
+detect_xauthority() {
+    if [ "$USE_EXISTING_DISPLAY" = false ]; then
+        XAUTH_FILE="/home/$TARGET_USER/.Xauthority"
+        return 0
+    fi
+
+    # Search common locations
+    XAUTH_LOCATIONS=(
+        "/home/$TARGET_USER/.Xauthority"
+        "/run/user/$(id -u $TARGET_USER 2>/dev/null || echo 1000)/gdm/Xauthority"
+        "/run/user/$(id -u $TARGET_USER 2>/dev/null || echo 1000)/xauth_*"
+    )
+
+    for loc in "${XAUTH_LOCATIONS[@]}"; do
+        # Use expansion for globs like xauth_*
+        for f in $loc; do
+            if [ -f "$f" ]; then
+                XAUTH_FILE="$f"
+                log_info "Detected Xauthority at: $XAUTH_FILE"
+                return 0
+            fi
+        done
+    done
+
+    # Fallback
+    XAUTH_FILE="/home/$TARGET_USER/.Xauthority"
+    log_warn "Could not find valid Xauthority, using default: $XAUTH_FILE"
+}
+
+
 detect_os
 detect_display
+detect_xauthority
 
 log_info "Target user: $TARGET_USER"
 log_info "Home directory: $USER_HOME"
 log_info "Display number: $DISPLAY_NUM"
+log_info "Xauthority file: $XAUTH_FILE"
 log_info "Using existing display: ${USE_EXISTING_DISPLAY:-false}"
 log_info "Install VS Code & Chrome: $INSTALL_CODE"
 
@@ -293,10 +350,10 @@ log_success "XFCE autostart configured"
 # PRE-FLIGHT: Existing Display Validation
 # ============================================================================
 if [ "$USE_EXISTING_DISPLAY" = true ]; then
-log_section "PRE-FLIGHT: Validating Existing Display (:0)"
+log_section "PRE-FLIGHT: Validating Existing Display ($DISPLAY_NUM)"
 
 # Try to grant X11 access
-if [ -S /tmp/.X11-unix/X0 ]; then
+if [ -S /tmp/.X11-unix/X${DISPLAY_NUM#:} ]; then
     log_info "Granting X11 permissions for $TARGET_USER..."
     xhost +SI:localuser:$TARGET_USER 2>/dev/null || true
     xhost +SI:localuser:root 2>/dev/null || true
@@ -304,7 +361,7 @@ if [ -S /tmp/.X11-unix/X0 ]; then
 fi
 
 # Verify access
-if sudo -u "$TARGET_USER" DISPLAY=:0 xdpyinfo &>/dev/null 2>&1; then
+if sudo -u "$TARGET_USER" DISPLAY=$DISPLAY_NUM xdpyinfo &>/dev/null 2>&1; then
     log_success "X11 access verified for $TARGET_USER"
 else
     log_warn "X11 access test failed - service may need manual xhost setup"
@@ -326,18 +383,18 @@ if [ -f /etc/systemd/system/vps-gui.service ]; then
 fi
 
 # ============================================================================
-# Wrapper for EXISTING DISPLAY mode (:0) - IMPROVED
+# Wrapper for EXISTING DISPLAY mode ($DISPLAY_NUM) - IMPROVED
 # ============================================================================
 if [ "$USE_EXISTING_DISPLAY" = true ]; then
-log_info "Creating wrapper script for existing display mode..."
+log_info "Creating wrapper script for existing display mode ($DISPLAY_NUM)..."
 cat > "$WRAPPER_DIR/vps-gui-wrapper-existing" << WRAPPER_SCRIPT
 #!/bin/bash
-# VPS GUI Wrapper for Existing Display Mode (:0)
+# VPS GUI Wrapper for Existing Display Mode ($DISPLAY_NUM)
 # Compatible with POP OS, Ubuntu Desktop, Debian with GUI
 
 set -e
-export DISPLAY=:0
-export XAUTHORITY="\${XAUTHORITY:-/home/$TARGET_USER/.Xauthority}"
+export DISPLAY=$DISPLAY_NUM
+export XAUTHORITY="$XAUTH_FILE"
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export SSH_ASKPASS=
 export SSH_ASKPASS_REQUIRE=never
@@ -346,8 +403,8 @@ export GNOME_KEYRING_CONTROL=
 # Wait for X server to be ready
 log_wait() { echo "[\$(date '+%H:%M:%S')] \$1"; }
 for i in {1..15}; do
-    if xdpyinfo -display :0 &>/dev/null; then
-        log_wait "X server :0 is ready"
+    if xdpyinfo -display $DISPLAY_NUM &>/dev/null; then
+        log_wait "X server $DISPLAY_NUM is ready"
         break
     fi
     log_wait "Waiting for X server... (\$i/15)"
@@ -355,23 +412,27 @@ for i in {1..15}; do
 done
 
 # Grant X11 access (multiple methods for compatibility)
-if [ -S /tmp/.X11-unix/X0 ]; then
-    xhost +SI:localuser:$TARGET_USER 2>/dev/null || true
-    xhost +SI:localuser:root 2>/dev/null || true
-    xhost +local: 2>/dev/null || true
+XAUTH_DIR="/run/user/$(id -u $TARGET_USER 2>/dev/null || echo 1000)"
+if [ -d "$XAUTH_DIR" ]; then
+    export XAUTHORITY=$(find "$XAUTH_DIR" -maxdepth 3 -name "Xauthority" -o -name "xauth_*" 2>/dev/null | head -n 1)
+    [ -n "$XAUTHORITY" ] && log_wait "Using dynamic Xauthority: $XAUTHORITY"
 fi
 
+# Try granting permissions (very aggressive)
+xhost +SI:localuser:$TARGET_USER 2>/dev/null || true
+xhost +local: 2>/dev/null || true
+
 # Start x11vnc with robust options for existing display
-# -display :0 : Use existing X server
-# -forever -shared : Allow multiple/reconnect
-# -nopw : No password (can be set via setpw.sh)
-# -rfbport 5900 : VNC port
-# -allow localhost : Security - only local connections
-# -xkb : X keyboard extension
-# -nowf : Disable wait-for-frame for better performance
-# -noxdamage : Disable XDamage extension (fixes some display issues)
-# -ncache 10 : Enable client-side caching
-x11vnc -display :0 \\
+# -auth \$XAUTHORITY: Use the detected authority file
+# -noxrecord -noxfixes: Required for some GNOME sessions
+# -noxdamage: Fixes refresh issues
+# -ncache 0: Important! Fixing BadMatch (invalid parameter attributes)
+X11VNC_BIN=\$(command -v x11vnc || echo "/usr/bin/x11vnc")
+WEBSOCKIFY_BIN=\$(command -v websockify || echo "/usr/bin/websockify")
+
+log_wait "Starting x11vnc using \$X11VNC_BIN..."
+\$X11VNC_BIN -display $DISPLAY_NUM \\
+    -auth "\${XAUTHORITY:-guess}" \\
     -forever \\
     -shared \\
     -nopw \\
@@ -380,7 +441,10 @@ x11vnc -display :0 \\
     -xkb \\
     -nowf \\
     -noxdamage \\
-    -ncache 10 \\
+    -noxrecord \\
+    -noxfixes \\
+    -noxinerama \\
+    -ncache 0 \\
     -logfile /tmp/x11vnc-existing.log &
 
 X11VNC_PID=\$!
@@ -395,8 +459,8 @@ if ! kill -0 \$X11VNC_PID 2>/dev/null; then
 fi
 
 # Start websockify (stays in foreground to keep service alive)
-log_wait "Starting websockify on port 6080..."
-exec websockify --web=/usr/share/novnc/ 6080 localhost:5900
+log_wait "Starting websockify using \$WEBSOCKIFY_BIN on port 6080..."
+exec \$WEBSOCKIFY_BIN --web=/usr/share/novnc/ 6080 localhost:5900
 WRAPPER_SCRIPT
 chmod +x "$WRAPPER_DIR/vps-gui-wrapper-existing"
 chown root:root "$WRAPPER_DIR/vps-gui-wrapper-existing"
@@ -408,14 +472,14 @@ fi
 # ============================================================================
 if [ "$USE_EXISTING_DISPLAY" = false ]; then
 log_info "Creating wrapper script for virtual display mode..."
-cat > "$WRAPPER_DIR/vps-gui-wrapper-virtual" << 'WRAPPER_SCRIPT'
+cat > "$WRAPPER_DIR/vps-gui-wrapper-virtual" << WRAPPER_SCRIPT
 #!/bin/bash
 # VPS GUI Wrapper for Virtual Display Mode (:1)
 # For headless VPS without existing GUI
 
 set -e
 export DISPLAY=:1
-export XAUTHORITY=$HOME/.Xauthority
+export XAUTHORITY="$XAUTH_FILE"
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export SSH_ASKPASS=
 export SSH_ASKPASS_REQUIRE=never
@@ -459,7 +523,7 @@ fi
 # Create systemd service based on display mode
 # ============================================================================
 if [ "$USE_EXISTING_DISPLAY" = true ]; then
-log_info "Creating service for existing display mode (:0)..."
+log_info "Creating service for existing display mode ($DISPLAY_NUM)..."
 cat > /etc/systemd/system/vps-gui.service << EOL
 [Unit]
 Description=Remote Desktop Service (x11vnc + noVNC) - Existing Display Mode
@@ -473,8 +537,8 @@ User=$TARGET_USER
 Group=$TARGET_USER
 
 # Critical environment variables for X11 access
-Environment="DISPLAY=:0"
-Environment="XAUTHORITY=/home/$TARGET_USER/.Xauthority"
+Environment="DISPLAY=$DISPLAY_NUM"
+Environment="XAUTHORITY=$XAUTH_FILE"
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="SSH_ASKPASS="
 Environment="SSH_ASKPASS_REQUIRE=never"
@@ -484,9 +548,8 @@ Environment="XDG_RUNTIME_DIR=/run/user/$(id -u $TARGET_USER 2>/dev/null || echo 
 
 WorkingDirectory=$USER_HOME
 
-# Pre-start checks
+# Pre-start checks (Removed xdpyinfo check because wrapper handles waiting)
 ExecStartPre=/bin/sleep 3
-ExecStartPre=/bin/bash -c 'xdpyinfo -display :0 &>/dev/null || exit 0'
 
 ExecStart=$WRAPPER_DIR/vps-gui-wrapper-existing
 
@@ -523,7 +586,7 @@ User=$TARGET_USER
 Group=$TARGET_USER
 
 Environment="DISPLAY=:1"
-Environment="XAUTHORITY=/home/$TARGET_USER/.Xauthority"
+Environment="XAUTHORITY=$XAUTH_FILE"
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="SSH_ASKPASS="
 Environment="SSH_ASKPASS_REQUIRE=never"

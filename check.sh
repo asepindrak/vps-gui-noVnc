@@ -51,18 +51,88 @@ fi
 USER_HOME="/home/$TARGET_USER"
 VNC_DIR="$USER_HOME/.vnc"
 
-# Auto-detect display mode (same logic as auto-install.sh)
-if ps aux | grep -q '[X]org' || ps aux | grep -q '[w]ayland'; then
-    # Detected running X server or Wayland on :0
-    DISPLAY_NUM=":0"
-    USE_EXISTING_DISPLAY=true
-    DISPLAY_MODE="EXISTING (POP OS/Ubuntu Desktop)"
-else
+# Auto-detect display mode (Aggressive Detection)
+detect_display() {
+    # 1. Try to get DISPLAY from target user's session via loginctl (Most reliable for existing desktop)
+    if [ -n "$TARGET_USER" ]; then
+        USER_SESSIONS=$(loginctl list-sessions --no-legend | awk '{print $1}') 2>/dev/null
+        for SESSION_ID in $USER_SESSIONS; do
+            SESSION_USER=$(loginctl show-session $SESSION_ID -p User --value)
+            if [ "$SESSION_USER" = "$TARGET_USER" ]; then
+                SESSION_DISPLAY=$(loginctl show-session $SESSION_ID -p Display --value)
+                if [ -n "$SESSION_DISPLAY" ]; then
+                    DISPLAY_NUM="$SESSION_DISPLAY"
+                    USE_EXISTING_DISPLAY=true
+                    DISPLAY_MODE="EXISTING (User Session - $DISPLAY_NUM)"
+                    return 0
+                fi
+            fi
+        done
+    fi
+
+    # 2. Check /tmp/.X11-unix/ for sockets (Sorted reverse to pick user session over login screen)
+    for socket in $(ls /tmp/.X11-unix/X* 2>/dev/null | sort -r); do
+        if [ -S "$socket" ]; then
+            num="${socket#/tmp/.X11-unix/X}"
+            DISPLAY_NUM=":$num"
+            # Quick check if this display responds to xauth
+            if DISPLAY=$DISPLAY_NUM xauth list &>/dev/null || DISPLAY=$DISPLAY_NUM xauth info &>/dev/null; then
+                 USE_EXISTING_DISPLAY=true
+                 DISPLAY_MODE="EXISTING (Socket Found - $DISPLAY_NUM)"
+                 return 0
+            fi
+        fi
+    done
+
+    # 3. Try to get DISPLAY from environment (Only if not :0)
+    if [ -n "$DISPLAY" ] && [ "$DISPLAY" != ":0" ]; then
+        DISPLAY_NUM="$DISPLAY"
+        USE_EXISTING_DISPLAY=true
+        DISPLAY_MODE="EXISTING (Environment - $DISPLAY_NUM)"
+        return 0
+    fi
+
+    # 4. Final fallback for :0
+    if [ -S /tmp/.X11-unix/X0 ]; then
+         DISPLAY_NUM=":0"
+         USE_EXISTING_DISPLAY=true
+         DISPLAY_MODE="EXISTING (Socket Fallback - :0)"
+         return 0
+    fi
+    
     # Virtual display mode for headless servers
     DISPLAY_NUM=":1"
     USE_EXISTING_DISPLAY=false
     DISPLAY_MODE="VIRTUAL (Headless Server)"
-fi
+}
+
+# Improved XAUTHORITY detection
+detect_xauthority() {
+    if [ "$USE_EXISTING_DISPLAY" = false ]; then
+        XAUTH_FILE="/home/$TARGET_USER/.Xauthority"
+        return 0
+    fi
+
+    XAUTH_LOCATIONS=(
+        "/home/$TARGET_USER/.Xauthority"
+        "/run/user/$(id -u $TARGET_USER 2>/dev/null || echo 1000)/gdm/Xauthority"
+        "/run/user/$(id -u $TARGET_USER 2>/dev/null || echo 1000)/xauth_*"
+    )
+
+    for loc in "${XAUTH_LOCATIONS[@]}"; do
+        for f in $loc; do
+            if [ -f "$f" ]; then
+                XAUTH_FILE="$f"
+                return 0
+            fi
+        done
+    done
+
+    XAUTH_FILE="/home/$TARGET_USER/.Xauthority"
+}
+
+detect_display
+detect_xauthority
 
 # Helper functions
 check_pass() {
@@ -165,7 +235,7 @@ section "3️⃣  RUNNING PROCESSES STATUS"
 
 # Xvfb - only check if in virtual display mode
 if [ "$USE_EXISTING_DISPLAY" = true ]; then
-    check_warn "Xvfb not needed (using existing display :0)"
+    check_warn "Xvfb not needed (using existing display $DISPLAY_NUM)"
 else
     if pgrep -f "Xvfb.*:1" > /dev/null; then
         check_pass "Xvfb (Virtual Display :1) is running"
