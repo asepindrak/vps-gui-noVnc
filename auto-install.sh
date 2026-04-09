@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #===============================================================================
-# 🚀 VPS GUI Complete Automation Script
-# Comprehensive setup for XFCE + noVNC + VS Code + Chrome
+# 🚀 VPS GUI Automation Script - Flexible Display Support
+# Works with existing GUI (POP OS, Ubuntu Desktop) or creates virtual display
+# Remote Desktop + noVNC + VS Code + Chrome automation
 # Can be run for fresh install OR update/fixing
 # Uses regular user (not root)
 #
 # Usage: sudo bash auto-install.sh [username] [install_code_browser]
 # Example: sudo bash auto-install.sh myuser yes
 # Example: sudo bash auto-install.sh  (default: current user, install YES)
+# Auto-detects existing display server on :0 and uses it
 #===============================================================================
 
 set -e
@@ -69,8 +71,19 @@ fi
 INSTALL_CODE="${2:-yes}"
 INSTALL_CODE="${INSTALL_CODE,,}"  # lowercase
 
-# Display for user
-DISPLAY_NUM=":1"
+# Auto-detect existing display or use new one
+if ps aux | grep -q '[X]org' || ps aux | grep -q '[w]ayland'; then
+    # Detected running X server or Wayland on :0
+    DISPLAY_NUM=":0"
+    USE_EXISTING_DISPLAY=true
+    log_warn "Detected existing display server - will use :0 (POP OS/Ubuntu Desktop mode)"
+else
+    # Create virtual display for headless servers
+    DISPLAY_NUM=":1"
+    USE_EXISTING_DISPLAY=false
+    log_info "No existing display detected - will create virtual display :1 (Server mode)"
+fi
+
 USER_HOME="/home/$TARGET_USER"
 VNC_DIR="$USER_HOME/.vnc"
 XFCE_CONFIG="$USER_HOME/.config/xfce4"
@@ -78,6 +91,7 @@ XFCE_CONFIG="$USER_HOME/.config/xfce4"
 log_info "Target user: $TARGET_USER"
 log_info "Home directory: $USER_HOME"
 log_info "Display number: $DISPLAY_NUM"
+log_info "Using existing display: ${USE_EXISTING_DISPLAY:-false}"
 log_info "Install VS Code & Chrome: $INSTALL_CODE"
 
 # ============================================================================
@@ -274,53 +288,83 @@ fi
 
 log_section "STEP 5: Create Systemd Service"
 
-cat > /etc/systemd/system/vps-gui.service << EOF
+# Create appropriate systemd service based on display mode
+if [ "$USE_EXISTING_DISPLAY" = true ]; then
+    # Simple service for existing display
+    cat > /etc/systemd/system/vps-gui.service << 'EOF'
 [Unit]
-Description=VPS GUI Service (Xvfb + XFCE + x11vnc + noVNC) for user: $TARGET_USER
+Description=Remote Desktop Service (x11vnc + noVNC) - Existing Display Mode
 After=network.target
-Wants=display-manager.service
+After=graphical.target
 
 [Service]
 Type=simple
 User=$TARGET_USER
 Environment="DISPLAY=$DISPLAY_NUM"
 Environment="XAUTHORITY=$USER_HOME/.Xauthority"
-# Disable keyring to prevent automation interruptions
 Environment="SSH_ASKPASS="
 Environment="SSH_ASKPASS_REQUIRE=never"
 Environment="GNOME_KEYRING_CONTROL="
 WorkingDirectory=$USER_HOME
 
-# Cleanups
-ExecStartPre=/bin/bash -c 'rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true'
-ExecStartPre=/bin/bash -c 'rm -f $USER_HOME/.Xauthority 2>/dev/null || true'
-
-# Main services
-ExecStart=/bin/bash -c ' \\
-  Xvfb $DISPLAY_NUM -screen 0 1280x720x24 & \\
-  sleep 2 && \\
-  export DISPLAY=$DISPLAY_NUM && \\
-  export XAUTHORITY=$USER_HOME/.Xauthority && \\
-  startxfce4 & \\
-  sleep 5 && \\
-  x11vnc -display $DISPLAY_NUM -forever -shared -nopw -rfbport 5900 & \\
+ExecStart=/bin/bash -c ' \
+  x11vnc -display $DISPLAY_NUM -forever -shared -nopw -rfbport 5900 & \
+  sleep 2 && \
   websockify --web=/usr/share/novnc/ 6080 localhost:5900 \
 '
 
 Restart=on-failure
 RestartSec=10
-
-# Resource limits
 MemoryMax=512M
 MemoryHigh=256M
+NoNewPrivileges=true
+PrivateTmp=true
 
-# Security
+[Install]
+WantedBy=graphical.target
+EOF
+else
+    # Full service for virtual display with Xvfb + XFCE
+    cat > /etc/systemd/system/vps-gui.service << 'EOF'
+[Unit]
+Description=Remote Desktop Service (Xvfb + XFCE + x11vnc + noVNC) - Virtual Display Mode
+After=network.target
+
+[Service]
+Type=simple
+User=$TARGET_USER
+Environment="DISPLAY=$DISPLAY_NUM"
+Environment="XAUTHORITY=$USER_HOME/.Xauthority"
+Environment="SSH_ASKPASS="
+Environment="SSH_ASKPASS_REQUIRE=never"
+Environment="GNOME_KEYRING_CONTROL="
+WorkingDirectory=$USER_HOME
+
+ExecStartPre=/bin/bash -c 'rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true'
+ExecStartPre=/bin/bash -c 'rm -f $USER_HOME/.Xauthority 2>/dev/null || true'
+
+ExecStart=/bin/bash -c ' \
+  Xvfb $DISPLAY_NUM -screen 0 1280x720x24 & \
+  sleep 2 && \
+  export DISPLAY=$DISPLAY_NUM && \
+  export XAUTHORITY=$USER_HOME/.Xauthority && \
+  startxfce4 & \
+  sleep 5 && \
+  x11vnc -display $DISPLAY_NUM -forever -shared -nopw -rfbport 5900 & \
+  websockify --web=/usr/share/novnc/ 6080 localhost:5900 \
+'
+
+Restart=on-failure
+RestartSec=10
+MemoryMax=512M
+MemoryHigh=256M
 NoNewPrivileges=true
 PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
+fi
 
 log_success "Systemd service created: /etc/systemd/system/vps-gui.service"
 
@@ -743,6 +787,7 @@ echo -e "${CYAN}📋 Setup Information:${NC}"
 echo "  Username      : $TARGET_USER"
 echo "  Home Dir      : $USER_HOME"
 echo "  Display       : $DISPLAY_NUM"
+echo "  Mode          : $(if [ "$USE_EXISTING_DISPLAY" = true ]; then echo "EXISTING (Desktop GUI)"; else echo "VIRTUAL (Headless Server)"; fi)"
 echo "  Server IP     : $SERVER_IP"
 echo ""
 echo -e "${CYAN}🌐 Access Information:${NC}"
@@ -785,8 +830,13 @@ echo ""
 echo -e "${YELLOW}💡 TIPS:${NC}"
 echo "  • Wait 10-20 seconds after first connect"
 echo "  • If desktop not showing, refresh browser (F5)"
-echo "  • Use Ctrl+Alt+F2 to open terminal in XFCE"
-echo "  • Desktop will auto-restart if you close it"
+if [ "$USE_EXISTING_DISPLAY" = true ]; then
+    echo "  • Changes are visible on your local monitor (POP OS/Ubuntu Desktop mode)"
+    echo "  • You can also access remotely via: http://SERVER_IP:6080"
+else
+    echo "  • Use Ctrl+Alt+F2 to open terminal in XFCE"
+    echo "  • Desktop will auto-restart if you close it"
+fi
 echo "  • Password was set during installation (or use: sudo bash setpw.sh)"
 echo ""
 echo -e "${NC}"
