@@ -422,6 +422,10 @@ fi
 xhost +SI:localuser:$TARGET_USER 2>/dev/null || true
 xhost +local: 2>/dev/null || true
 
+# Detect binary dynamically
+X11VNC_BIN=\$(command -v x11vnc || echo "/usr/bin/x11vnc")
+WEBSOCKIFY_BIN=\$(command -v websockify || echo "/usr/bin/websockify")
+
 # Start x11vnc with robust options for existing display
 # -auth $XAUTHORITY: Use the detected authority file
 # -noxrecord -noxfixes: Required for some GNOME sessions
@@ -429,9 +433,9 @@ xhost +local: 2>/dev/null || true
 # -noxshm: IMPORTANT! Fixing BadMatch (invalid parameter attributes) on X_GetImage
 # -noxinerama: For single/multiple display compatibility
 # -solid: Improve GNOME desktop compatibility
-log_wait "Starting x11vnc using $X11VNC_BIN..."
-$X11VNC_BIN -display $DISPLAY_NUM \\
-    -auth "${XAUTHORITY:-guess}" \\
+log_wait "Starting x11vnc using \$X11VNC_BIN..."
+\$X11VNC_BIN -display $DISPLAY_NUM \\
+    -auth "\${XAUTHORITY:-guess}" \\
     -forever \\
     -shared \\
     -nopw \\
