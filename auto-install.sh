@@ -297,6 +297,80 @@ if [ -f /etc/systemd/system/vps-gui.service ]; then
     systemctl daemon-reload
 fi
 
+# Create wrapper scripts for better systemd compatibility
+WRAPPER_DIR="/usr/local/bin"
+
+# Wrapper for existing display mode (:0)
+if [ "$USE_EXISTING_DISPLAY" = true ]; then
+    log_info "Creating wrapper script for existing display mode..."
+    cat > "$WRAPPER_DIR/vps-gui-wrapper-existing" << 'WRAPPER_SCRIPT'
+#!/bin/bash
+# VPS GUI Wrapper for Existing Display Mode
+# Runs x11vnc + websockify on display :0
+
+export DISPLAY=:0
+export XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}
+
+# Ensure X permissions are set
+if [ -S /tmp/.X11-unix/X0 ]; then
+    xhost +SI:localuser:$USER 2>/dev/null || true
+fi
+
+# Start x11vnc in background with proper options for existing display
+x11vnc -display :0 -forever -shared -nopw -rfbport 5900 -allow localhost &
+X11VNC_PID=$!
+
+# Give x11vnc time to initialize
+sleep 3
+
+# Start websockify (stays in foreground to keep service alive)
+exec websockify --web=/usr/share/novnc/ 6080 localhost:5900
+
+WRAPPER_SCRIPT
+    chmod +x "$WRAPPER_DIR/vps-gui-wrapper-existing"
+    chown root:root "$WRAPPER_DIR/vps-gui-wrapper-existing"
+    log_success "Wrapper script created: $WRAPPER_DIR/vps-gui-wrapper-existing"
+fi
+
+# Wrapper for virtual display mode (:1)
+if [ "$USE_EXISTING_DISPLAY" = false ]; then
+    log_info "Creating wrapper script for virtual display mode..."
+    cat > "$WRAPPER_DIR/vps-gui-wrapper-virtual" << 'WRAPPER_SCRIPT'
+#!/bin/bash
+# VPS GUI Wrapper for Virtual Display Mode
+# Runs Xvfb + XFCE + x11vnc + websockify on display :1
+
+export DISPLAY=:1
+export XAUTHORITY=$HOME/.Xauthority
+
+# Cleanup old display locks
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
+rm -f "$XAUTHORITY" 2>/dev/null || true
+
+# Start Xvfb (virtual framebuffer)
+Xvfb :1 -screen 0 1280x720x24 &
+XVFB_PID=$!
+sleep 2
+
+# Start XFCE desktop
+startxfce4 &
+sleep 5
+
+# Start x11vnc in background
+x11vnc -display :1 -forever -shared -nopw -rfbport 5900 &
+X11VNC_PID=$!
+
+# Give x11vnc time to initialize
+sleep 2
+
+# Start websockify (stays in foreground)
+exec websockify --web=/usr/share/novnc/ 6080 localhost:5900
+
+WRAPPER_SCRIPT
+    chmod +x "$WRAPPER_DIR/vps-gui-wrapper-virtual"
+    chown root:root "$WRAPPER_DIR/vps-gui-wrapper-virtual"
+fi
+
 # Create appropriate systemd service based on display mode
 if [ "$USE_EXISTING_DISPLAY" = true ]; then
     # Simple service for existing display
@@ -305,30 +379,31 @@ if [ "$USE_EXISTING_DISPLAY" = true ]; then
 [Unit]
 Description=Remote Desktop Service (x11vnc + noVNC) - Existing Display Mode
 After=network.target
-PartOf=graphical-session.target
-Wants=graphical-session.target
+After=graphical.target
 
 [Service]
 Type=simple
 User=$TARGET_USER
-Environment="DISPLAY=:0"
-Environment="XAUTHORITY=$USER_HOME/.Xauthority"
+Group=$TARGET_USER
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="SSH_ASKPASS="
 Environment="SSH_ASKPASS_REQUIRE=never"
 Environment="GNOME_KEYRING_CONTROL="
 WorkingDirectory=$USER_HOME
 
-# Wait for X server to be fully ready, then start x11vnc
-ExecStartPre=/bin/sleep 3
-ExecStart=/bin/bash -c "x11vnc -display :0 -forever -shared -nopw -rfbport 5900 & sleep 2 && websockify --web=/usr/share/novnc/ 6080 localhost:5900"
+ExecStartPre=/bin/sleep 2
+ExecStart=$WRAPPER_DIR/vps-gui-wrapper-existing
 
 Restart=on-failure
 RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vps-gui
 MemoryMax=512M
 MemoryHigh=256M
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=multi-user.target
 EOL
 else
     # Full service for virtual display with Xvfb + XFCE
@@ -341,17 +416,12 @@ After=network.target
 [Service]
 Type=simple
 User=$TARGET_USER
-Environment="DISPLAY=$DISPLAY_NUM"
-Environment="XAUTHORITY=$USER_HOME/.Xauthority"
 Environment="SSH_ASKPASS="
 Environment="SSH_ASKPASS_REQUIRE=never"
 Environment="GNOME_KEYRING_CONTROL="
 WorkingDirectory=$USER_HOME
 
-ExecStartPre=/bin/bash -c 'rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true'
-ExecStartPre=/bin/bash -c 'rm -f $USER_HOME/.Xauthority 2>/dev/null || true'
-
-ExecStart=/bin/bash -c "Xvfb $DISPLAY_NUM -screen 0 1280x720x24 & sleep 2 && export DISPLAY=$DISPLAY_NUM && export XAUTHORITY=$USER_HOME/.Xauthority && startxfce4 & sleep 5 && x11vnc -display $DISPLAY_NUM -forever -shared -nopw -rfbport 5900 & websockify --web=/usr/share/novnc/ 6080 localhost:5900"
+ExecStart=$WRAPPER_DIR/vps-gui-wrapper-virtual
 
 Restart=on-failure
 RestartSec=10
@@ -366,6 +436,7 @@ EOL
 fi
 
 log_success "Systemd service created: /etc/systemd/system/vps-gui.service"
+log_success "Wrapper scripts created: $WRAPPER_DIR/vps-gui-wrapper-*"
 
 # ============================================================================
 # STEP 6: SETUP XFCE DISPLAY ENVIRONMENT
