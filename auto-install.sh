@@ -288,10 +288,20 @@ fi
 
 log_section "STEP 5: Create Systemd Service"
 
+# Remove old service file if exists (cleanup from previous installations)
+if [ -f /etc/systemd/system/vps-gui.service ]; then
+    log_info "Removing old service file..."
+    systemctl stop vps-gui 2>/dev/null || true
+    systemctl disable vps-gui 2>/dev/null || true
+    rm -f /etc/systemd/system/vps-gui.service
+    systemctl daemon-reload
+fi
+
 # Create appropriate systemd service based on display mode
 if [ "$USE_EXISTING_DISPLAY" = true ]; then
     # Simple service for existing display
-    cat > /etc/systemd/system/vps-gui.service << 'EOF'
+    log_info "Creating service for existing display mode (:0)..."
+    cat > /etc/systemd/system/vps-gui.service << EOL
 [Unit]
 Description=Remote Desktop Service (x11vnc + noVNC) - Existing Display Mode
 After=network.target
@@ -307,11 +317,7 @@ Environment="SSH_ASKPASS_REQUIRE=never"
 Environment="GNOME_KEYRING_CONTROL="
 WorkingDirectory=$USER_HOME
 
-ExecStart=/bin/bash -c ' \
-  x11vnc -display $DISPLAY_NUM -forever -shared -nopw -rfbport 5900 & \
-  sleep 2 && \
-  websockify --web=/usr/share/novnc/ 6080 localhost:5900 \
-'
+ExecStart=/bin/bash -c 'x11vnc -display $DISPLAY_NUM -forever -shared -nopw -rfbport 5900 & sleep 2 && websockify --web=/usr/share/novnc/ 6080 localhost:5900'
 
 Restart=on-failure
 RestartSec=10
@@ -322,10 +328,11 @@ PrivateTmp=true
 
 [Install]
 WantedBy=graphical.target
-EOF
+EOL
 else
     # Full service for virtual display with Xvfb + XFCE
-    cat > /etc/systemd/system/vps-gui.service << 'EOF'
+    log_info "Creating service for virtual display mode (:1)..."
+    cat > /etc/systemd/system/vps-gui.service << EOL
 [Unit]
 Description=Remote Desktop Service (Xvfb + XFCE + x11vnc + noVNC) - Virtual Display Mode
 After=network.target
@@ -343,16 +350,7 @@ WorkingDirectory=$USER_HOME
 ExecStartPre=/bin/bash -c 'rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true'
 ExecStartPre=/bin/bash -c 'rm -f $USER_HOME/.Xauthority 2>/dev/null || true'
 
-ExecStart=/bin/bash -c ' \
-  Xvfb $DISPLAY_NUM -screen 0 1280x720x24 & \
-  sleep 2 && \
-  export DISPLAY=$DISPLAY_NUM && \
-  export XAUTHORITY=$USER_HOME/.Xauthority && \
-  startxfce4 & \
-  sleep 5 && \
-  x11vnc -display $DISPLAY_NUM -forever -shared -nopw -rfbport 5900 & \
-  websockify --web=/usr/share/novnc/ 6080 localhost:5900 \
-'
+ExecStart=/bin/bash -c 'Xvfb $DISPLAY_NUM -screen 0 1280x720x24 & sleep 2 && export DISPLAY=$DISPLAY_NUM && export XAUTHORITY=$USER_HOME/.Xauthority && startxfce4 & sleep 5 && x11vnc -display $DISPLAY_NUM -forever -shared -nopw -rfbport 5900 & websockify --web=/usr/share/novnc/ 6080 localhost:5900'
 
 Restart=on-failure
 RestartSec=10
@@ -363,7 +361,7 @@ PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOL
 fi
 
 log_success "Systemd service created: /etc/systemd/system/vps-gui.service"
