@@ -320,7 +320,7 @@ WorkingDirectory=$USER_HOME
 
 # Wait for X server to be fully ready, then start x11vnc
 ExecStartPre=/bin/sleep 3
-ExecStart=/bin/bash -c 'x11vnc -display :0 -forever -shared -nopw -rfbport 5900 & sleep 2 && websockify --web=/usr/share/novnc/ 6080 localhost:5900'
+ExecStart=/bin/bash -c "x11vnc -display :0 -forever -shared -nopw -rfbport 5900 & sleep 2 && websockify --web=/usr/share/novnc/ 6080 localhost:5900"
 
 Restart=on-failure
 RestartSec=10
@@ -351,7 +351,7 @@ WorkingDirectory=$USER_HOME
 ExecStartPre=/bin/bash -c 'rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true'
 ExecStartPre=/bin/bash -c 'rm -f $USER_HOME/.Xauthority 2>/dev/null || true'
 
-ExecStart=/bin/bash -c 'Xvfb $DISPLAY_NUM -screen 0 1280x720x24 & sleep 2 && export DISPLAY=$DISPLAY_NUM && export XAUTHORITY=$USER_HOME/.Xauthority && startxfce4 & sleep 5 && x11vnc -display $DISPLAY_NUM -forever -shared -nopw -rfbport 5900 & websockify --web=/usr/share/novnc/ 6080 localhost:5900'
+ExecStart=/bin/bash -c "Xvfb $DISPLAY_NUM -screen 0 1280x720x24 & sleep 2 && export DISPLAY=$DISPLAY_NUM && export XAUTHORITY=$USER_HOME/.Xauthority && startxfce4 & sleep 5 && x11vnc -display $DISPLAY_NUM -forever -shared -nopw -rfbport 5900 & websockify --web=/usr/share/novnc/ 6080 localhost:5900"
 
 Restart=on-failure
 RestartSec=10
