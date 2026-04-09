@@ -176,6 +176,10 @@ chmod 700 "$VNC_DIR"
 # Create xstartup script for user
 cat > "$VNC_DIR/xstartup" << 'EOF'
 #!/bin/bash
+# Disable XFCE/GNOME Keyring to avoid automation interruptions
+export SSH_ASKPASS=""
+export SSH_ASKPASS_REQUIRE=never
+
 xrdb $HOME/.Xresources
 startxfce4 &
 EOF
@@ -207,7 +211,62 @@ EOF
 
 chown "$TARGET_USER:$TARGET_USER" "$XFCE_CONFIG/autostart/x11vnc.desktop"
 
-log_success "XFCE autostart configured"
+# Disable XFCE Keyring daemon to avoid password prompts during automation
+cat > "$XFCE_CONFIG/autostart/xfce4-notifyd.desktop" << EOF
+[Desktop Entry]
+Type=Application
+Name=Notification Daemon
+Exec=xfce4-notifyd
+Hidden=true
+NoDisplay=true
+EOF
+
+chown "$TARGET_USER:$TARGET_USER" "$XFCE_CONFIG/autostart/xfce4-notifyd.desktop"
+
+# Disable GNOME Keyring from autostart (prevents internet keyring prompts)
+cat > "$XFCE_CONFIG/autostart/gnome-keyring.desktop" << EOF
+[Desktop Entry]
+Type=Application
+Name=GNOME Keyring
+Exec=gnome-keyring-daemon
+Hidden=true
+NoDisplay=true
+X-XFCE-Autostart=false
+EOF
+
+chown "$TARGET_USER:$TARGET_USER" "$XFCE_CONFIG/autostart/gnome-keyring.desktop"
+
+# Also disable it with .hidden file method
+touch "$XFCE_CONFIG/autostart/gnome-keyring-ssh.desktop.hidden" 2>/dev/null || true
+touch "$XFCE_CONFIG/autostart/gnome-keyring-gpg.desktop.hidden" 2>/dev/null || true
+touch "$XFCE_CONFIG/autostart/gnome-keyring-pkcs11.desktop.hidden" 2>/dev/null || true
+
+log_success "XFCE autostart configured + keyring disabled for automation"
+
+# Auto-start VS Code when XFCE starts (if installed)
+if [[ "$INSTALL_CODE" == "yes" ]] || [[ "$INSTALL_CODE" == "y" ]]; then
+    cat > "$XFCE_CONFIG/autostart/vscode.desktop" << EOF
+[Desktop Entry]
+Type=Application
+Name=Visual Studio Code
+# Delay 8 seconds to ensure XFCE is fully initialized
+Exec=bash -c 'sleep 8 && $USER_HOME/.local/bin/vscode-vnc --autostart'
+Icon=code
+Categories=Development;IDE;
+NoDisplay=false
+StartupNotify=false
+X-XFCE-Autostart-Override=true
+Terminal=false
+MimeType=text/plain;
+Hidden=false
+Comment=Code Editor - Launches automatically with XFCE
+EOF
+
+    chown "$TARGET_USER:$TARGET_USER" "$XFCE_CONFIG/autostart/vscode.desktop"
+    log_success "VS Code autostart configured - will launch automatically when XFCE starts"
+else
+    log_info "VS Code autostart skipped (INSTALL_CODE=no)"
+fi
 
 # ============================================================================
 # STEP 5: CREATE SYSTEMD SERVICE
@@ -226,6 +285,10 @@ Type=simple
 User=$TARGET_USER
 Environment="DISPLAY=$DISPLAY_NUM"
 Environment="XAUTHORITY=$USER_HOME/.Xauthority"
+# Disable keyring to prevent automation interruptions
+Environment="SSH_ASKPASS="
+Environment="SSH_ASKPASS_REQUIRE=never"
+Environment="GNOME_KEYRING_CONTROL="
 WorkingDirectory=$USER_HOME
 
 # Cleanups
@@ -308,17 +371,39 @@ if [[ "$INSTALL_CODE" == "yes" ]] || [[ "$INSTALL_CODE" == "y" ]]; then
     cat > "$USER_HOME/.local/bin/vscode-vnc" << 'WRAPPER'
 #!/usr/bin/env bash
 # VS Code Wrapper for noVNC/XFCE compatibility
+# Handles both manual launch and autostart scenarios
+
+# Wait for display to be ready if called from autostart
+if [ -z "$DISPLAY" ]; then
+    export DISPLAY=:1
+    # Give XFCE a moment to fully initialize
+    sleep 3
+fi
+
+# Clean up any stale lock files
 rm -f ~/.config/Code/lock 2>/dev/null
 rm -f ~/.config/Code/*.lock 2>/dev/null
 rm -f ~/.config/Code/Crashpad/lock 2>/dev/null
 
-exec /usr/bin/code \
-    --no-sandbox \
-    --disable-gpu \
-    --disable-dev-shm-usage \
-    --force-renderer-accessibility \
-    --disable-setuid-sandbox \
-    "$@"
+# Run VS Code in background if launched from autostart (no terminal)
+if [ "$1" == "--autostart" ]; then
+    nohup /usr/bin/code \
+        --no-sandbox \
+        --disable-gpu \
+        --disable-dev-shm-usage \
+        --force-renderer-accessibility \
+        --disable-setuid-sandbox \
+        "$@" &>/dev/null &
+else
+    # Normal execution for manual launch
+    exec /usr/bin/code \
+        --no-sandbox \
+        --disable-gpu \
+        --disable-dev-shm-usage \
+        --force-renderer-accessibility \
+        --disable-setuid-sandbox \
+        "$@"
+fi
 WRAPPER
     
     chmod +x "$USER_HOME/.local/bin/vscode-vnc"
