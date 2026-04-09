@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #===============================================================================
-# 🚀 VPS GUI Automation Script - Flexible Display Support
-# Works with existing GUI (POP OS, Ubuntu Desktop) or creates virtual display
+# 🚀 VPS GUI Automation Script - Flexible Display Support (IMPROVED)
+# Works with: Headless VPS, Ubuntu Desktop, POP OS, Debian with/without GUI
 # Remote Desktop + noVNC + VS Code + Chrome automation
 # Can be run for fresh install OR update/fixing
 # Uses regular user (not root)
@@ -11,7 +11,6 @@
 # Example: sudo bash auto-install.sh  (default: current user, install YES)
 # Auto-detects existing display server on :0 and uses it
 #===============================================================================
-
 set -e
 
 # ============================================================================
@@ -25,22 +24,10 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-log_success() {
-    echo -e "${GREEN}[✓]${NC} $1"
-}
-
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[✓]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_section() {
     echo ""
     echo -e "${CYAN}════════════════════════════════════════════════════════${NC}"
@@ -52,41 +39,86 @@ log_section() {
 # ============================================================================
 # PARAMETER & VALIDATION
 # ============================================================================
-
-# Check root
 if [ "$EUID" -ne 0 ]; then
     log_error "Script MUST be run with sudo"
     echo "Usage: sudo bash $0 [username] [install_code_browser]"
     exit 1
 fi
 
-# Username (from parameter or user who run sudo)
 TARGET_USER="${1:-$SUDO_USER}"
 if [ -z "$TARGET_USER" ]; then
     TARGET_USER="vpsuser"
     log_warn "No username provided, will use: $TARGET_USER"
 fi
 
-# Install VS Code & Chrome?
 INSTALL_CODE="${2:-yes}"
-INSTALL_CODE="${INSTALL_CODE,,}"  # lowercase
-
-# Auto-detect existing display or use new one
-if ps aux | grep -q '[X]org' || ps aux | grep -q '[w]ayland'; then
-    # Detected running X server or Wayland on :0
-    DISPLAY_NUM=":0"
-    USE_EXISTING_DISPLAY=true
-    log_warn "Detected existing display server - will use :0 (POP OS/Ubuntu Desktop mode)"
-else
-    # Create virtual display for headless servers
-    DISPLAY_NUM=":1"
-    USE_EXISTING_DISPLAY=false
-    log_info "No existing display detected - will create virtual display :1 (Server mode)"
-fi
+INSTALL_CODE="${INSTALL_CODE,,}"
 
 USER_HOME="/home/$TARGET_USER"
 VNC_DIR="$USER_HOME/.vnc"
 XFCE_CONFIG="$USER_HOME/.config/xfce4"
+WRAPPER_DIR="/usr/local/bin"
+
+# ============================================================================
+# OS DETECTION
+# ============================================================================
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS_NAME="$NAME"
+        OS_ID="$ID"
+        OS_VERSION="$VERSION_ID"
+    elif [ -f /etc/debian_version ]; then
+        OS_NAME="Debian"
+        OS_ID="debian"
+        OS_VERSION=$(cat /etc/debian_version)
+    elif [ -f /etc/redhat-release ]; then
+        OS_NAME="RHEL-based"
+        OS_ID="rhel"
+    else
+        OS_NAME="Unknown"
+        OS_ID="unknown"
+    fi
+    log_info "Detected OS: $OS_NAME ($OS_ID) version $OS_VERSION"
+}
+
+# ============================================================================
+# DISPLAY DETECTION (Improved)
+# ============================================================================
+detect_display() {
+    # Check for running X server on :0
+    if DISPLAY=:0 xdpyinfo &>/dev/null 2>&1; then
+        DISPLAY_NUM=":0"
+        USE_EXISTING_DISPLAY=true
+        log_warn "Detected existing X server on :0 - Using EXISTING DISPLAY mode (POP OS/Ubuntu Desktop)"
+        return 0
+    fi
+    
+    # Check for Wayland session
+    if loginctl show-session $(loginctl | grep $(whoami) | awk '{print $1}') -p Type 2>/dev/null | grep -q wayland; then
+        DISPLAY_NUM=":0"
+        USE_EXISTING_DISPLAY=true
+        log_warn "Detected Wayland session - Using EXISTING DISPLAY mode (may need XWayland)"
+        return 0
+    fi
+    
+    # Check for Xorg/Wayland processes
+    if ps aux | grep -q '[X]org' || ps aux | grep -q '[w]ayland'; then
+        DISPLAY_NUM=":0"
+        USE_EXISTING_DISPLAY=true
+        log_warn "Detected display server process - Using EXISTING DISPLAY mode"
+        return 0
+    fi
+    
+    # Default to virtual display for headless
+    DISPLAY_NUM=":1"
+    USE_EXISTING_DISPLAY=false
+    log_info "No existing display detected - Using VIRTUAL DISPLAY mode (Headless Server)"
+    return 0
+}
+
+detect_os
+detect_display
 
 log_info "Target user: $TARGET_USER"
 log_info "Home directory: $USER_HOME"
@@ -97,25 +129,19 @@ log_info "Install VS Code & Chrome: $INSTALL_CODE"
 # ============================================================================
 # STEP 1: CREATE USER IF NOT EXISTS
 # ============================================================================
-
 log_section "STEP 1: User & System Setup"
-
 if id "$TARGET_USER" &>/dev/null; then
     log_success "User '$TARGET_USER' already exists"
 else
     log_info "Creating user '$TARGET_USER'..."
     useradd -m -s /bin/bash -G sudo,video,audio,input "$TARGET_USER"
     log_success "User '$TARGET_USER' successfully created"
-    
-    # Set password if not already set
     log_info "Set password for user (or Enter to skip):"
     passwd "$TARGET_USER" || true
 fi
 
-# Ensure user is in correct groups
 usermod -a -G sudo,video,audio,input,render "$TARGET_USER" 2>/dev/null || true
 
-# Ensure home directory exists
 if [ ! -d "$USER_HOME" ]; then
     mkdir -p "$USER_HOME"
     chown "$TARGET_USER:$TARGET_USER" "$USER_HOME"
@@ -124,80 +150,81 @@ if [ ! -d "$USER_HOME" ]; then
 fi
 
 # ============================================================================
-# STEP 2: SYSTEM UPDATE & PACKAGES
+# STEP 2: SYSTEM UPDATE & PACKAGES (Multi-OS)
 # ============================================================================
-
 log_section "STEP 2: Update & Install Dependencies"
 
-log_info "Updating package list..."
-apt update -y
+# Detect package manager
+if command -v apt &>/dev/null; then
+    PKG_MANAGER="apt"
+    log_info "Using apt package manager"
+elif command -v dnf &>/dev/null; then
+    PKG_MANAGER="dnf"
+    log_info "Using dnf package manager"
+elif command -v yum &>/dev/null; then
+    PKG_MANAGER="yum"
+    log_info "Using yum package manager"
+else
+    log_error "No supported package manager found"
+    exit 1
+fi
 
-log_info "Upgrading packages..."
-apt upgrade -y
+log_info "Updating package list..."
+if [ "$PKG_MANAGER" = "apt" ]; then
+    apt update -y && apt upgrade -y
+elif [ "$PKG_MANAGER" = "dnf" ] || [ "$PKG_MANAGER" = "yum" ]; then
+    $PKG_MANAGER update -y
+fi
 
 log_info "Installing base dependencies..."
-PACKAGES=(
-    # GUI & Display
-    "xfce4"
-    "xfce4-goodies"
-    "xfce4-terminal"
-    "xfce4-taskmanager"
+if [ "$PKG_MANAGER" = "apt" ]; then
+    PACKAGES=(
+        # GUI & Display
+        "xfce4" "xfce4-goodies" "xfce4-terminal" "xfce4-taskmanager"
+        # VNC & Virtual Display
+        "xvfb" "x11vnc" "websockify" "novnc"
+        # Tools
+        "net-tools" "curl" "wget" "git" "nano" "vim" "htop" "build-essential"
+        # X11 utilities
+        "xauth" "xdpyinfo" "xset" "wmctrl" "xorg"
+        # Sound
+        "pulseaudio" "pavucontrol"
+        # Fonts
+        "fonts-ubuntu" "fonts-dejavu"
+    )
+    apt install -y "${PACKAGES[@]}" || true
     
-    # VNC & Virtual Display
-    "xvfb"
-    "x11vnc"
-    "websockify"
-    "novnc"
-    
-    # Tools & Utilities
-    "net-tools"
-    "curl"
-    "wget"
-    "git"
-    "nano"
-    "vim"
-    "htop"
-    "build-essential"
-    
-    # X11 utilities
-    "xauth"
-    "xdpyinfo"
-    "xset"
-    "wmctrl"
-    
-    # Sound & Multimedia
-    "pulseaudio"
-    "pavucontrol"
-    
-    # Font & Rendering
-    "fonts-ubuntu"
-    "fonts-dejavu"
-)
+elif [ "$PKG_MANAGER" = "dnf" ] || [ "$PKG_MANAGER" = "yum" ]; then
+    # RHEL-based packages (simplified mapping)
+    $PKG_MANAGER install -y epel-release || true
+    $PKG_MANAGER install -y \
+        xfce4 xfce4-goodies xfce4-terminal \
+        xorg-x11-server-Xvfb x11vnc websockify \
+        curl wget git nano vim htop \
+        xorg-x11-xauth xorg-x11-utils \
+        pulseaudio pavucontrol \
+        dejavu-sans-fonts dejavu-serif-fonts || true
+fi
 
-apt install -y "${PACKAGES[@]}" || true
 log_success "Dependencies installed"
 
 # ============================================================================
 # STEP 3: SETUP VNC DIRECTORY & FILES
 # ============================================================================
-
 log_section "STEP 3: Setup VNC Configuration"
-
 mkdir -p "$VNC_DIR"
-chown "$TARGET_USER:$TARGET_USER" "$VNC_DIR"
+chown -R "$TARGET_USER:$TARGET_USER" "$VNC_DIR"
 chmod 700 "$VNC_DIR"
 
-# Create xstartup script for user
+# Create xstartup script
 cat > "$VNC_DIR/xstartup" << 'EOF'
 #!/bin/bash
-# Disable XFCE/GNOME Keyring to avoid automation interruptions
 export SSH_ASKPASS=""
 export SSH_ASKPASS_REQUIRE=never
-
-xrdb $HOME/.Xresources
+export GNOME_KEYRING_CONTROL=""
+xrdb $HOME/.Xresources 2>/dev/null || true
 startxfce4 &
 EOF
-
 chmod +x "$VNC_DIR/xstartup"
 chown "$TARGET_USER:$TARGET_USER" "$VNC_DIR/xstartup"
 log_success "xstartup script created"
@@ -205,13 +232,12 @@ log_success "xstartup script created"
 # ============================================================================
 # STEP 4: SETUP XFCE AUTOSTART
 # ============================================================================
-
 log_section "STEP 4: Setup XFCE Autostart Configuration"
-
 mkdir -p "$XFCE_CONFIG/autostart"
 chown -R "$TARGET_USER:$TARGET_USER" "$XFCE_CONFIG"
 
-# Autostart x11vnc
+# x11vnc autostart (only for virtual display mode)
+if [ "$USE_EXISTING_DISPLAY" = false ]; then
 cat > "$XFCE_CONFIG/autostart/x11vnc.desktop" << EOF
 [Desktop Entry]
 Type=Application
@@ -222,10 +248,9 @@ X-XFCE-Autostart-Override=true
 StartupNotify=false
 Hidden=false
 EOF
+fi
 
-chown "$TARGET_USER:$TARGET_USER" "$XFCE_CONFIG/autostart/x11vnc.desktop"
-
-# Disable XFCE Keyring daemon to avoid password prompts during automation
+# Disable keyring prompts
 cat > "$XFCE_CONFIG/autostart/xfce4-notifyd.desktop" << EOF
 [Desktop Entry]
 Type=Application
@@ -235,9 +260,6 @@ Hidden=true
 NoDisplay=true
 EOF
 
-chown "$TARGET_USER:$TARGET_USER" "$XFCE_CONFIG/autostart/xfce4-notifyd.desktop"
-
-# Disable GNOME Keyring from autostart (prevents internet keyring prompts)
 cat > "$XFCE_CONFIG/autostart/gnome-keyring.desktop" << EOF
 [Desktop Entry]
 Type=Application
@@ -248,22 +270,12 @@ NoDisplay=true
 X-XFCE-Autostart=false
 EOF
 
-chown "$TARGET_USER:$TARGET_USER" "$XFCE_CONFIG/autostart/gnome-keyring.desktop"
-
-# Also disable it with .hidden file method
-touch "$XFCE_CONFIG/autostart/gnome-keyring-ssh.desktop.hidden" 2>/dev/null || true
-touch "$XFCE_CONFIG/autostart/gnome-keyring-gpg.desktop.hidden" 2>/dev/null || true
-touch "$XFCE_CONFIG/autostart/gnome-keyring-pkcs11.desktop.hidden" 2>/dev/null || true
-
-log_success "XFCE autostart configured + keyring disabled for automation"
-
-# Auto-start VS Code when XFCE starts (if installed)
+# VS Code autostart
 if [[ "$INSTALL_CODE" == "yes" ]] || [[ "$INSTALL_CODE" == "y" ]]; then
-    cat > "$XFCE_CONFIG/autostart/vscode.desktop" << EOF
+cat > "$XFCE_CONFIG/autostart/vscode.desktop" << EOF
 [Desktop Entry]
 Type=Application
 Name=Visual Studio Code
-# Delay 8 seconds to ensure XFCE is fully initialized
 Exec=bash -c 'sleep 8 && $USER_HOME/.local/bin/vscode-vnc --autostart'
 Icon=code
 Categories=Development;IDE;
@@ -271,24 +283,40 @@ NoDisplay=false
 StartupNotify=false
 X-XFCE-Autostart-Override=true
 Terminal=false
-MimeType=text/plain;
 Hidden=false
-Comment=Code Editor - Launches automatically with XFCE
 EOF
+fi
+chown -R "$TARGET_USER:$TARGET_USER" "$XFCE_CONFIG/autostart"
+log_success "XFCE autostart configured"
 
-    chown "$TARGET_USER:$TARGET_USER" "$XFCE_CONFIG/autostart/vscode.desktop"
-    log_success "VS Code autostart configured - will launch automatically when XFCE starts"
+# ============================================================================
+# PRE-FLIGHT: Existing Display Validation
+# ============================================================================
+if [ "$USE_EXISTING_DISPLAY" = true ]; then
+log_section "PRE-FLIGHT: Validating Existing Display (:0)"
+
+# Try to grant X11 access
+if [ -S /tmp/.X11-unix/X0 ]; then
+    log_info "Granting X11 permissions for $TARGET_USER..."
+    xhost +SI:localuser:$TARGET_USER 2>/dev/null || true
+    xhost +SI:localuser:root 2>/dev/null || true
+    xhost +local: 2>/dev/null || true
+fi
+
+# Verify access
+if sudo -u "$TARGET_USER" DISPLAY=:0 xdpyinfo &>/dev/null 2>&1; then
+    log_success "X11 access verified for $TARGET_USER"
 else
-    log_info "VS Code autostart skipped (INSTALL_CODE=no)"
+    log_warn "X11 access test failed - service may need manual xhost setup"
+fi
 fi
 
 # ============================================================================
-# STEP 5: CREATE SYSTEMD SERVICE
+# STEP 5: CREATE WRAPPER SCRIPTS & SYSTEMD SERVICE
 # ============================================================================
+log_section "STEP 5: Create Systemd Service & Wrappers"
 
-log_section "STEP 5: Create Systemd Service"
-
-# Remove old service file if exists (cleanup from previous installations)
+# Cleanup old service
 if [ -f /etc/systemd/system/vps-gui.service ]; then
     log_info "Removing old service file..."
     systemctl stop vps-gui 2>/dev/null || true
@@ -297,58 +325,108 @@ if [ -f /etc/systemd/system/vps-gui.service ]; then
     systemctl daemon-reload
 fi
 
-# Create wrapper scripts for better systemd compatibility
-WRAPPER_DIR="/usr/local/bin"
-
-# Wrapper for existing display mode (:0)
+# ============================================================================
+# Wrapper for EXISTING DISPLAY mode (:0) - IMPROVED
+# ============================================================================
 if [ "$USE_EXISTING_DISPLAY" = true ]; then
-    log_info "Creating wrapper script for existing display mode..."
-    cat > "$WRAPPER_DIR/vps-gui-wrapper-existing" << 'WRAPPER_SCRIPT'
+log_info "Creating wrapper script for existing display mode..."
+cat > "$WRAPPER_DIR/vps-gui-wrapper-existing" << WRAPPER_SCRIPT
 #!/bin/bash
-# VPS GUI Wrapper for Existing Display Mode
-# Runs x11vnc + websockify on display :0
+# VPS GUI Wrapper for Existing Display Mode (:0)
+# Compatible with POP OS, Ubuntu Desktop, Debian with GUI
 
+set -e
 export DISPLAY=:0
-export XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}
+export XAUTHORITY="\${XAUTHORITY:-/home/$TARGET_USER/.Xauthority}"
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export SSH_ASKPASS=
+export SSH_ASKPASS_REQUIRE=never
+export GNOME_KEYRING_CONTROL=
 
-# Ensure X permissions are set
+# Wait for X server to be ready
+log_wait() { echo "[\$(date '+%H:%M:%S')] \$1"; }
+for i in {1..15}; do
+    if xdpyinfo -display :0 &>/dev/null; then
+        log_wait "X server :0 is ready"
+        break
+    fi
+    log_wait "Waiting for X server... (\$i/15)"
+    sleep 2
+done
+
+# Grant X11 access (multiple methods for compatibility)
 if [ -S /tmp/.X11-unix/X0 ]; then
-    xhost +SI:localuser:$USER 2>/dev/null || true
+    xhost +SI:localuser:$TARGET_USER 2>/dev/null || true
+    xhost +SI:localuser:root 2>/dev/null || true
+    xhost +local: 2>/dev/null || true
 fi
 
-# Start x11vnc in background with proper options for existing display
-x11vnc -display :0 -forever -shared -nopw -rfbport 5900 -allow localhost &
-X11VNC_PID=$!
+# Start x11vnc with robust options for existing display
+# -display :0 : Use existing X server
+# -forever -shared : Allow multiple/reconnect
+# -nopw : No password (can be set via setpw.sh)
+# -rfbport 5900 : VNC port
+# -allow localhost : Security - only local connections
+# -xkb : X keyboard extension
+# -nowf : Disable wait-for-frame for better performance
+# -noxdamage : Disable XDamage extension (fixes some display issues)
+# -ncache 10 : Enable client-side caching
+x11vnc -display :0 \\
+    -forever \\
+    -shared \\
+    -nopw \\
+    -rfbport 5900 \\
+    -allow localhost \\
+    -xkb \\
+    -nowf \\
+    -noxdamage \\
+    -ncache 10 \\
+    -logfile /tmp/x11vnc-existing.log &
 
-# Give x11vnc time to initialize
+X11VNC_PID=\$!
+log_wait "x11vnc started with PID: \$X11VNC_PID"
+
+# Verify x11vnc is running
 sleep 3
+if ! kill -0 \$X11VNC_PID 2>/dev/null; then
+    echo "[ERROR] x11vnc failed to start" >&2
+    cat /tmp/x11vnc-existing.log 2>/dev/null >&2 || true
+    exit 1
+fi
 
 # Start websockify (stays in foreground to keep service alive)
+log_wait "Starting websockify on port 6080..."
 exec websockify --web=/usr/share/novnc/ 6080 localhost:5900
-
 WRAPPER_SCRIPT
-    chmod +x "$WRAPPER_DIR/vps-gui-wrapper-existing"
-    chown root:root "$WRAPPER_DIR/vps-gui-wrapper-existing"
-    log_success "Wrapper script created: $WRAPPER_DIR/vps-gui-wrapper-existing"
+chmod +x "$WRAPPER_DIR/vps-gui-wrapper-existing"
+chown root:root "$WRAPPER_DIR/vps-gui-wrapper-existing"
+log_success "Wrapper created: $WRAPPER_DIR/vps-gui-wrapper-existing"
 fi
 
-# Wrapper for virtual display mode (:1)
+# ============================================================================
+# Wrapper for VIRTUAL DISPLAY mode (:1)
+# ============================================================================
 if [ "$USE_EXISTING_DISPLAY" = false ]; then
-    log_info "Creating wrapper script for virtual display mode..."
-    cat > "$WRAPPER_DIR/vps-gui-wrapper-virtual" << 'WRAPPER_SCRIPT'
+log_info "Creating wrapper script for virtual display mode..."
+cat > "$WRAPPER_DIR/vps-gui-wrapper-virtual" << 'WRAPPER_SCRIPT'
 #!/bin/bash
-# VPS GUI Wrapper for Virtual Display Mode
-# Runs Xvfb + XFCE + x11vnc + websockify on display :1
+# VPS GUI Wrapper for Virtual Display Mode (:1)
+# For headless VPS without existing GUI
 
+set -e
 export DISPLAY=:1
 export XAUTHORITY=$HOME/.Xauthority
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export SSH_ASKPASS=
+export SSH_ASKPASS_REQUIRE=never
+export GNOME_KEYRING_CONTROL=
 
 # Cleanup old display locks
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
 rm -f "$XAUTHORITY" 2>/dev/null || true
 
 # Start Xvfb (virtual framebuffer)
-Xvfb :1 -screen 0 1280x720x24 &
+Xvfb :1 -screen 0 1280x720x24 +extension RANDR &
 XVFB_PID=$!
 sleep 2
 
@@ -356,42 +434,60 @@ sleep 2
 startxfce4 &
 sleep 5
 
-# Start x11vnc in background
-x11vnc -display :1 -forever -shared -nopw -rfbport 5900 &
+# Start x11vnc
+x11vnc -display :1 -forever -shared -nopw -rfbport 5900 -allow localhost &
 X11VNC_PID=$!
-
-# Give x11vnc time to initialize
 sleep 2
 
-# Start websockify (stays in foreground)
-exec websockify --web=/usr/share/novnc/ 6080 localhost:5900
+# Verify processes
+for pid in $XVFB_PID $X11VNC_PID; do
+    if ! kill -0 $pid 2>/dev/null; then
+        echo "[ERROR] Process $pid failed to start" >&2
+        exit 1
+    fi
+done
 
+# Start websockify (foreground)
+exec websockify --web=/usr/share/novnc/ 6080 localhost:5900
 WRAPPER_SCRIPT
-    chmod +x "$WRAPPER_DIR/vps-gui-wrapper-virtual"
-    chown root:root "$WRAPPER_DIR/vps-gui-wrapper-virtual"
+chmod +x "$WRAPPER_DIR/vps-gui-wrapper-virtual"
+chown root:root "$WRAPPER_DIR/vps-gui-wrapper-virtual"
+log_success "Wrapper created: $WRAPPER_DIR/vps-gui-wrapper-virtual"
 fi
 
-# Create appropriate systemd service based on display mode
+# ============================================================================
+# Create systemd service based on display mode
+# ============================================================================
 if [ "$USE_EXISTING_DISPLAY" = true ]; then
-    # Simple service for existing display
-    log_info "Creating service for existing display mode (:0)..."
-    cat > /etc/systemd/system/vps-gui.service << EOL
+log_info "Creating service for existing display mode (:0)..."
+cat > /etc/systemd/system/vps-gui.service << EOL
 [Unit]
 Description=Remote Desktop Service (x11vnc + noVNC) - Existing Display Mode
-After=network.target
-After=graphical.target
+After=network.target graphical.target display-manager.service
+Requires=graphical.target
+Wants=network.target
 
 [Service]
 Type=simple
 User=$TARGET_USER
 Group=$TARGET_USER
+
+# Critical environment variables for X11 access
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=/home/$TARGET_USER/.Xauthority"
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="SSH_ASKPASS="
 Environment="SSH_ASKPASS_REQUIRE=never"
 Environment="GNOME_KEYRING_CONTROL="
+Environment="XDG_SESSION_TYPE=x11"
+Environment="XDG_RUNTIME_DIR=/run/user/$(id -u $TARGET_USER 2>/dev/null || echo 1000)"
+
 WorkingDirectory=$USER_HOME
 
-ExecStartPre=/bin/sleep 2
+# Pre-start checks
+ExecStartPre=/bin/sleep 3
+ExecStartPre=/bin/bash -c 'xdpyinfo -display :0 &>/dev/null || exit 0'
+
 ExecStart=$WRAPPER_DIR/vps-gui-wrapper-existing
 
 Restart=on-failure
@@ -399,16 +495,24 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vps-gui
+
+# Resource limits
 MemoryMax=512M
 MemoryHigh=256M
+
+# Relaxed security for existing display mode (needs X11 access)
+NoNewPrivileges=false
+PrivateTmp=false
+ProtectHome=false
 
 [Install]
 WantedBy=multi-user.target
 EOL
+
 else
-    # Full service for virtual display with Xvfb + XFCE
-    log_info "Creating service for virtual display mode (:1)..."
-    cat > /etc/systemd/system/vps-gui.service << EOL
+# Virtual display mode service
+log_info "Creating service for virtual display mode (:1)..."
+cat > /etc/systemd/system/vps-gui.service << EOL
 [Unit]
 Description=Remote Desktop Service (Xvfb + XFCE + x11vnc + noVNC) - Virtual Display Mode
 After=network.target
@@ -416,15 +520,25 @@ After=network.target
 [Service]
 Type=simple
 User=$TARGET_USER
+Group=$TARGET_USER
+
+Environment="DISPLAY=:1"
+Environment="XAUTHORITY=/home/$TARGET_USER/.Xauthority"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="SSH_ASKPASS="
 Environment="SSH_ASKPASS_REQUIRE=never"
 Environment="GNOME_KEYRING_CONTROL="
+
 WorkingDirectory=$USER_HOME
 
 ExecStart=$WRAPPER_DIR/vps-gui-wrapper-virtual
 
 Restart=on-failure
 RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vps-gui
+
 MemoryMax=512M
 MemoryHigh=256M
 NoNewPrivileges=true
@@ -436,418 +550,298 @@ EOL
 fi
 
 log_success "Systemd service created: /etc/systemd/system/vps-gui.service"
-log_success "Wrapper scripts created: $WRAPPER_DIR/vps-gui-wrapper-*"
 
 # ============================================================================
-# STEP 6: SETUP XFCE DISPLAY ENVIRONMENT
+# STEP 6: SETUP ENVIRONMENT VARIABLES
 # ============================================================================
-
 log_section "STEP 6: Setup Environment Variables"
-
-# Set DISPLAY permanent in user profile
 for profile_file in "$USER_HOME/.bash_profile" "$USER_HOME/.bashrc" "$USER_HOME/.profile"; do
-    if ! grep -q "export DISPLAY=$DISPLAY_NUM" "$profile_file" 2>/dev/null; then
-        echo "export DISPLAY=$DISPLAY_NUM" >> "$profile_file"
-        chown "$TARGET_USER:$TARGET_USER" "$profile_file"
+    if [ -f "$profile_file" ] || [ "$USE_EXISTING_DISPLAY" = true ]; then
+        if ! grep -q "export DISPLAY=$DISPLAY_NUM" "$profile_file" 2>/dev/null; then
+            echo "export DISPLAY=$DISPLAY_NUM" >> "$profile_file" 2>/dev/null || true
+            chown "$TARGET_USER:$TARGET_USER" "$profile_file" 2>/dev/null || true
+        fi
     fi
 done
-
 log_success "Environment variables configured"
 
 # ============================================================================
-# STEP 7: OPTIONAL - INSTALL VS CODE
+# STEP 7: INSTALL VS CODE (Optional)
 # ============================================================================
-
 if [[ "$INSTALL_CODE" == "yes" ]] || [[ "$INSTALL_CODE" == "y" ]]; then
-    log_section "STEP 7: Installing VS Code"
-    
-    if command -v code &>/dev/null; then
-        log_success "VS Code already installed"
-    else
-        log_info "Downloading & installing VS Code..."
-        
-        cd /tmp
-        wget -q https://aka.ms/download-vscode-stable -O vscode.deb || \
-        curl -fL https://aka.ms/download-vscode-stable -o vscode.deb
-        
-        if [ -f vscode.deb ]; then
-            apt install -y ./vscode.deb
-            rm -f vscode.deb
-            log_success "VS Code successfully installed"
+log_section "STEP 7: Installing VS Code"
+if command -v code &>/dev/null; then
+    log_success "VS Code already installed"
+else
+    log_info "Downloading & installing VS Code..."
+    cd /tmp
+    if wget -q https://aka.ms/download-vscode-stable -O vscode.deb 2>/dev/null || \
+       curl -fL https://aka.ms/download-vscode-stable -o vscode.deb 2>/dev/null; then
+        if [ "$PKG_MANAGER" = "apt" ]; then
+            apt install -y ./vscode.deb 2>/dev/null || true
         else
-            log_warn "Failed to download VS Code, skip..."
+            dpkg -i vscode.deb 2>/dev/null || apt install -f -y 2>/dev/null || true
         fi
+        rm -f vscode.deb
+        log_success "VS Code installed"
+    else
+        log_warn "Failed to download VS Code, skipping..."
     fi
-    
-    # Setup VS Code for user
-    mkdir -p "$USER_HOME/.local/bin"
-    
-    cat > "$USER_HOME/.local/bin/vscode-vnc" << 'WRAPPER'
-#!/usr/bin/env bash
-# VS Code Wrapper for noVNC/XFCE compatibility
-# Handles both manual launch and autostart scenarios
-
-# Wait for display to be ready if called from autostart
-if [ -z "$DISPLAY" ]; then
-    export DISPLAY=:1
-    # Give XFCE a moment to fully initialize
-    sleep 3
 fi
 
-# Clean up any stale lock files
-rm -f ~/.config/Code/lock 2>/dev/null
-rm -f ~/.config/Code/*.lock 2>/dev/null
-rm -f ~/.config/Code/Crashpad/lock 2>/dev/null
-
-# Run VS Code in background if launched from autostart (no terminal)
+# VS Code wrapper
+mkdir -p "$USER_HOME/.local/bin"
+cat > "$USER_HOME/.local/bin/vscode-vnc" << 'WRAPPER'
+#!/usr/bin/env bash
+export DISPLAY="${DISPLAY:-:1}"
+rm -f ~/.config/Code/lock ~/.config/Code/*.lock ~/.config/Code/Crashpad/lock 2>/dev/null
 if [ "$1" == "--autostart" ]; then
-    nohup /usr/bin/code \
-        --no-sandbox \
-        --disable-gpu \
-        --disable-dev-shm-usage \
-        --force-renderer-accessibility \
-        --disable-setuid-sandbox \
-        "$@" &>/dev/null &
+    nohup /usr/bin/code --no-sandbox --disable-gpu --disable-dev-shm-usage --force-renderer-accessibility "$@" &>/dev/null &
 else
-    # Normal execution for manual launch
-    exec /usr/bin/code \
-        --no-sandbox \
-        --disable-gpu \
-        --disable-dev-shm-usage \
-        --force-renderer-accessibility \
-        --disable-setuid-sandbox \
-        "$@"
+    exec /usr/bin/code --no-sandbox --disable-gpu --disable-dev-shm-usage --force-renderer-accessibility "$@"
 fi
 WRAPPER
-    
-    chmod +x "$USER_HOME/.local/bin/vscode-vnc"
-    chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.local/bin/vscode-vnc"
-    
-    # Update desktop launcher
-    if [ -f "/usr/share/applications/code.desktop" ]; then
-        sed -i "s|^Exec=.*|Exec=$USER_HOME/.local/bin/vscode-vnc|" /usr/share/applications/code.desktop
-        log_success "VS Code launcher updated"
-    fi
-    
+chmod +x "$USER_HOME/.local/bin/vscode-vnc"
+chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.local/bin/vscode-vnc"
+
+# Update desktop launcher
+if [ -f "/usr/share/applications/code.desktop" ]; then
+    sed -i "s|^Exec=.*|Exec=$USER_HOME/.local/bin/vscode-vnc|" /usr/share/applications/code.desktop
+fi
+log_success "VS Code launcher configured"
 else
-    log_warn "STEP 7: Skipping VS Code installation"
+log_warn "STEP 7: Skipping VS Code installation"
 fi
 
 # ============================================================================
-# STEP 8: OPTIONAL - INSTALL CHROME
+# STEP 8: INSTALL CHROME (Optional)
 # ============================================================================
-
 if [[ "$INSTALL_CODE" == "yes" ]] || [[ "$INSTALL_CODE" == "y" ]]; then
-    log_section "STEP 8: Installing Google Chrome"
-    
-    if command -v google-chrome-stable &>/dev/null; then
-        log_success "Google Chrome already installed"
-    else
-        log_info "Downloading & installing Google Chrome..."
-        
-        cd /tmp
-        curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o chrome.deb || \
-        wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O chrome.deb
-        
-        if [ -f chrome.deb ]; then
-            apt install -y ./chrome.deb
-            rm -f chrome.deb
-            log_success "Google Chrome successfully installed"
+log_section "STEP 8: Installing Google Chrome"
+if command -v google-chrome-stable &>/dev/null; then
+    log_success "Google Chrome already installed"
+else
+    log_info "Downloading & installing Google Chrome..."
+    cd /tmp
+    if curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o chrome.deb 2>/dev/null || \
+       wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O chrome.deb 2>/dev/null; then
+        if [ "$PKG_MANAGER" = "apt" ]; then
+            apt install -y ./chrome.deb 2>/dev/null || true
         else
-            log_warn "Failed to download Chrome, skip..."
+            dpkg -i chrome.deb 2>/dev/null || apt install -f -y 2>/dev/null || true
         fi
+        rm -f chrome.deb
+        log_success "Google Chrome installed"
+    else
+        log_warn "Failed to download Chrome, skipping..."
     fi
-    
-    # Setup Chrome wrapper
-    mkdir -p "$USER_HOME/.local/bin"
-    
-    cat > "$USER_HOME/.local/bin/chrome-vnc" << 'WRAPPER'
+fi
+
+# Chrome wrapper
+cat > "$USER_HOME/.local/bin/chrome-vnc" << 'WRAPPER'
 #!/usr/bin/env bash
-# Chrome Wrapper for noVNC compatibility
-rm -f ~/.config/google-chrome/SingletonLock 2>/dev/null
-rm -f ~/.config/google-chrome/SingletonCookie 2>/dev/null
+rm -f ~/.config/google-chrome/SingletonLock ~/.config/google-chrome/SingletonCookie 2>/dev/null
 exec /usr/bin/google-chrome-stable --no-sandbox --disable-gpu --disable-dev-shm-usage "$@"
 WRAPPER
-    
-    chmod +x "$USER_HOME/.local/bin/chrome-vnc"
-    chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.local/bin/chrome-vnc"
-    
-    # Update Chrome desktop launcher
-    for desktop_file in /usr/share/applications/google-chrome*.desktop; do
-        if [ -f "$desktop_file" ]; then
-            sed -i "s|^Exec=.*|Exec=$USER_HOME/.local/bin/chrome-vnc|" "$desktop_file"
-        fi
-    done
-    log_success "Chrome launcher updated"
-    
+chmod +x "$USER_HOME/.local/bin/chrome-vnc"
+chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.local/bin/chrome-vnc"
+
+for desktop_file in /usr/share/applications/google-chrome*.desktop; do
+    [ -f "$desktop_file" ] && sed -i "s|^Exec=.*|Exec=$USER_HOME/.local/bin/chrome-vnc|" "$desktop_file"
+done
+log_success "Chrome launcher configured"
 else
-    log_warn "STEP 8: Skipping Google Chrome installation"
+log_warn "STEP 8: Skipping Google Chrome installation"
 fi
 
 # ============================================================================
 # STEP 9: FIREWALL CONFIGURATION
 # ============================================================================
-
 log_section "STEP 9: Firewall Configuration"
-
 if command -v ufw &>/dev/null; then
     if sudo ufw status | grep -q "Status: inactive"; then
-        log_info "UFW inactive, enable it? (y/n)"
-        read -r -t 5 enable_ufw || enable_ufw="y"
-        if [[ "$enable_ufw" == "y" ]]; then
-            ufw --force enable
-            log_success "UFW enabled"
-        fi
+        log_info "UFW inactive - enabling basic rules"
+        ufw --force enable 2>/dev/null || true
     fi
-    
-    # Add rules
     ufw allow 6080/tcp 2>/dev/null || true
     ufw allow 5900/tcp 2>/dev/null || true
     ufw allow 22/tcp 2>/dev/null || true
-    
     log_success "Firewall rules configured"
 else
-    log_warn "UFW not installed, firewall skip"
+    log_warn "UFW not installed, skipping firewall setup"
 fi
 
 # ============================================================================
 # STEP 10: SYSTEMD SERVICE ACTIVATION
 # ============================================================================
-
 log_section "STEP 10: Systemd Service Activation"
-
 systemctl daemon-reload
 log_success "Systemd reloaded"
 
-if systemctl is-enabled vps-gui &>/dev/null; then
-    log_info "Service already enabled, restarting..."
-    systemctl restart vps-gui
-else
-    log_info "Enabling service for auto-start..."
+systemctl stop vps-gui 2>/dev/null || true
+sleep 2
+
+if ! systemctl is-enabled vps-gui &>/dev/null; then
     systemctl enable vps-gui
-    log_success "Service enabled"
+    log_success "Service enabled for auto-start"
 fi
 
 log_info "Starting service..."
 systemctl start vps-gui
-sleep 3
 
-log_info "Checking service status..."
-if systemctl is-active --quiet vps-gui; then
-    log_success "Service is running!"
-else
-    log_error "Service failed to start"
-    systemctl status vps-gui --no-pager || true
+# Wait and verify
+sleep 5
+for i in {1..5}; do
+    if systemctl is-active --quiet vps-gui 2>/dev/null; then
+        log_success "✅ Service started successfully!"
+        break
+    fi
+    log_info "Waiting for service... ($i/5)"
+    sleep 2
+done
+
+if ! systemctl is-active --quiet vps-gui 2>/dev/null; then
+    log_error "❌ Service failed to start"
+    journalctl -u vps-gui -n 20 --no-pager || true
+    if [ "$USE_EXISTING_DISPLAY" = true ]; then
+        log_info "💡 For existing display mode, try:"
+        echo "  1. Log out and log back in to refresh X session"
+        echo "  2. Run: xhost +SI:localuser:$TARGET_USER"
+        echo "  3. Then: sudo systemctl restart vps-gui"
+    fi
 fi
 
 # ============================================================================
-# STEP 11: VERIFICATION & TESTING
+# STEP 11: VERIFICATION
 # ============================================================================
-
 log_section "STEP 11: Verification & Testing"
 
 # Check X server
-if xdpyinfo -display "$DISPLAY_NUM" &>/dev/null; then
-    log_success "X server running on $DISPLAY_NUM"
+if DISPLAY="$DISPLAY_NUM" xdpyinfo &>/dev/null 2>&1; then
+    log_success "X server responding on $DISPLAY_NUM"
 else
-    log_warn "X server not responding yet, wait..."
-    sleep 5
-    if xdpyinfo -display "$DISPLAY_NUM" &>/dev/null; then
-        log_success "X server running on $DISPLAY_NUM"
-    fi
+    log_warn "X server not responding yet (may need user session)"
 fi
 
 # Check ports
 log_info "Checking ports..."
-if ss -tlnp 2>/dev/null | grep -q :6080; then
+if ss -tlnp 2>/dev/null | grep -q ":6080 "; then
     log_success "Port 6080 (noVNC) listening"
 else
-    log_warn "Port 6080 not responding yet"
+    log_warn "Port 6080 not listening yet"
 fi
-
-if ss -tlnp 2>/dev/null | grep -q :5900; then
+if ss -tlnp 2>/dev/null | grep -q ":5900 "; then
     log_success "Port 5900 (VNC) listening"
 else
-    log_warn "Port 5900 not responding yet"
+    log_warn "Port 5900 not listening yet"
 fi
 
-# Get IP address
-SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+# Get IP
+SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}' || echo "localhost")
 
 # ============================================================================
-# STEP 12: OPTIONAL - SETUP VNC PASSWORD
+# STEP 12: VNC PASSWORD SETUP (Optional)
 # ============================================================================
-
 log_section "STEP 12: Optional - Setup VNC Password"
-
-log_info "VNC Password Setup (Optional - Recommended for security)"
-log_info "Do you want to set a VNC password? (y/n) [default: n]"
-
+log_info "Set VNC password? (y/n) [default: n]"
 read -r -t 10 setup_password || setup_password="n"
 
 if [[ "$setup_password" == "y" || "$setup_password" == "Y" ]]; then
     log_info "Setting VNC password..."
-    
-    # Stop service
-    systemctl stop vps-gui
+    systemctl stop vps-gui 2>/dev/null || true
     sleep 2
     
-    # Prompt for password
-    echo "Enter VNC password (will be hidden):"
+    echo "Enter VNC password (hidden):"
     read -s -r vnc_password
     echo ""
-    echo "Confirm password (will be hidden):"
-    read -s -r vnc_password_confirm
+    echo "Confirm password:"
+    read -s -r vnc_confirm
     echo ""
     
-    if [ "$vnc_password" != "$vnc_password_confirm" ]; then
-        log_error "Passwords do not match! Skipping password setup"
-    else
-        # Generate password file for the user
+    if [ "$vnc_password" = "$vnc_confirm" ] && [ -n "$vnc_password" ]; then
         if sudo -u "$TARGET_USER" x11vnc -storepasswd "$vnc_password" "$VNC_DIR/passwd" 2>/dev/null; then
             chmod 600 "$VNC_DIR/passwd"
             chown "$TARGET_USER:$TARGET_USER" "$VNC_DIR/passwd"
-            
-            # Update service to use password authentication
             sed -i 's/-nopw/-rfbauth '"$VNC_DIR"'\/passwd/g' /etc/systemd/system/vps-gui.service
-            
-            # Reload and restart
             systemctl daemon-reload
             systemctl start vps-gui
-            sleep 3
-            
             log_success "VNC password set successfully!"
-            log_info "Password file: $VNC_DIR/passwd"
         else
-            log_error "Failed to set password, using no-password mode"
+            log_error "Failed to set password"
             systemctl start vps-gui
         fi
+    else
+        log_error "Passwords don't match or empty"
+        systemctl start vps-gui
     fi
 else
-    log_warn "STEP 12: Skipping password setup (using no-password mode)"
-    log_warn "To set password later, run: sudo bash setpw.sh"
+    log_warn "Using no-password mode (set later with: sudo bash setpw.sh)"
 fi
 
 # ============================================================================
-# STEP 13: OPTIONAL - NGINX PROXY SETUP
+# STEP 13: NGINX PROXY (Optional)
 # ============================================================================
-
 log_section "STEP 13: Optional - Nginx Proxy Setup"
-
-# Check if port 6969 is available
 PORT_PROXY=6969
 PORT_LOCAL=8081
 
-if ss -tlnp 2>/dev/null | grep -q ":$PORT_PROXY "; then
-    log_warn "Port $PORT_PROXY is already in use"
-    read -p "Enter different proxy port [default: skip]: " -t 10 -r PROXY_PORT_INPUT
-    
-    if [ -n "$PROXY_PORT_INPUT" ]; then
-        # Validate port
-        if [[ "$PROXY_PORT_INPUT" =~ ^[0-9]+$ ]] && [ "$PROXY_PORT_INPUT" -ge 1 ] && [ "$PROXY_PORT_INPUT" -le 65535 ]; then
-            PORT_PROXY="$PROXY_PORT_INPUT"
-            log_info "Using custom proxy port: $PORT_PROXY"
-        else
-            log_error "Invalid port number, skipping nginx setup"
-            PORT_PROXY=""
+if ! ss -tlnp 2>/dev/null | grep -q ":$PORT_PROXY "; then
+    if ! command -v nginx &>/dev/null; then
+        log_info "Installing nginx..."
+        if [ "$PKG_MANAGER" = "apt" ]; then
+            apt install -y nginx 2>/dev/null || true
+        elif [ "$PKG_MANAGER" = "dnf" ] || [ "$PKG_MANAGER" = "yum" ]; then
+            $PKG_MANAGER install -y nginx 2>/dev/null || true
         fi
-    else
-        log_warn "Skipping nginx proxy setup (port $PORT_PROXY already in use)"
-        PORT_PROXY=""
     fi
-fi
-
-if [ -n "$PORT_PROXY" ]; then
-    # Check if port is still available after user input
-    if ss -tlnp 2>/dev/null | grep -q ":$PORT_PROXY "; then
-        log_error "Port $PORT_PROXY is also in use, skipping nginx setup"
-    else
-        # Install nginx if not already installed
-        if ! command -v nginx &> /dev/null; then
-            log_info "Installing nginx..."
-            sudo apt-get update > /dev/null 2>&1
-            sudo apt-get install -y nginx > /dev/null 2>&1
-            log_success "nginx installed"
-        else
-            log_info "nginx already installed"
-        fi
-        
-        # Create nginx proxy configuration
+    
+    if command -v nginx &>/dev/null; then
         log_info "Configuring nginx proxy..."
-        
         NGINX_CONFIG="/etc/nginx/sites-available/vps-gui-proxy"
         
-        sudo tee "$NGINX_CONFIG" > /dev/null <<'NGINX_EOF'
+        cat > "$NGINX_CONFIG" << NGINX_EOF
 server {
-    listen PORT_PROXY default_server;
-    listen [::]:PORT_PROXY default_server;
-
-    root /var/www/html;
-    index index.html index.htm index.nginx-debian.html;
+    listen $PORT_PROXY default_server;
+    listen [::]:$PORT_PROXY default_server;
     server_name _;
-
+    
     location / {
-        proxy_pass http://127.0.0.1:PORT_LOCAL;
+        proxy_pass http://127.0.0.1:$PORT_LOCAL;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 NGINX_EOF
         
-        # Replace placeholders
-        sudo sed -i "s/PORT_PROXY/$PORT_PROXY/g" "$NGINX_CONFIG"
-        sudo sed -i "s/PORT_LOCAL/$PORT_LOCAL/g" "$NGINX_CONFIG"
+        [ ! -L "/etc/nginx/sites-enabled/vps-gui-proxy" ] && \
+            ln -sf "$NGINX_CONFIG" "/etc/nginx/sites-enabled/vps-gui-proxy"
+        rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
         
-        # Enable site
-        if [ ! -L "/etc/nginx/sites-enabled/vps-gui-proxy" ]; then
-            sudo ln -s "$NGINX_CONFIG" "/etc/nginx/sites-enabled/vps-gui-proxy"
-            log_info "Enabled nginx site"
-        fi
-        
-        # Disable default site if needed
-        if [ -L "/etc/nginx/sites-enabled/default" ]; then
-            sudo rm "/etc/nginx/sites-enabled/default"
-        fi
-        
-        # Test nginx configuration
-        if sudo nginx -t > /dev/null 2>&1; then
-            log_success "nginx configuration valid"
-            
-            # Enable and start nginx
-            sudo systemctl enable nginx > /dev/null 2>&1
-            sudo systemctl restart nginx > /dev/null 2>&1
-            log_success "nginx started"
-            
-            # Verify service
-            if sudo systemctl is-active --quiet nginx; then
-                log_success "Nginx proxy setup complete!"
-                log_info "Access via: http://$SERVER_IP:$PORT_PROXY"
+        if nginx -t &>/dev/null; then
+            systemctl enable nginx --now &>/dev/null || true
+            systemctl restart nginx &>/dev/null || true
+            if systemctl is-active --quiet nginx 2>/dev/null; then
+                log_success "Nginx proxy configured on port $PORT_PROXY"
                 NGINX_CONFIGURED=1
-            else
-                log_error "nginx failed to start"
-                NGINX_CONFIGURED=0
             fi
         else
-            log_error "nginx configuration invalid, skipping"
-            NGINX_CONFIGURED=0
+            log_warn "Nginx config invalid, skipping"
         fi
     fi
 else
-    log_warn "STEP 13: Skipping nginx proxy setup"
-    NGINX_CONFIGURED=0
+    log_warn "Port $PORT_PROXY in use, skipping nginx setup"
 fi
+NGINX_CONFIGURED=${NGINX_CONFIGURED:-0}
 
 # ============================================================================
 # FINAL SUMMARY
 # ============================================================================
-
 log_section "✅ INSTALLATION COMPLETE!"
-
 echo -e "${GREEN}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "🎉 VPS GUI Automation Setup Finished Successfully!"
@@ -858,55 +852,35 @@ echo "  Username      : $TARGET_USER"
 echo "  Home Dir      : $USER_HOME"
 echo "  Display       : $DISPLAY_NUM"
 echo "  Mode          : $(if [ "$USE_EXISTING_DISPLAY" = true ]; then echo "EXISTING (Desktop GUI)"; else echo "VIRTUAL (Headless Server)"; fi)"
+echo "  OS            : $OS_NAME ($OS_ID)"
 echo "  Server IP     : $SERVER_IP"
 echo ""
 echo -e "${CYAN}🌐 Access Information:${NC}"
 echo "  Browser URL   : ${GREEN}http://$SERVER_IP:6080${NC}"
 echo "  VNC Direct    : ${GREEN}vnc://$SERVER_IP:5900${NC}"
-if [ "${NGINX_CONFIGURED:-0}" -eq 1 ]; then
-    echo "  Nginx Proxy   : ${GREEN}http://$SERVER_IP:$PORT_PROXY${NC}${YELLOW} (Alternative access)${NC}"
-fi
+[ "$NGINX_CONFIGURED" -eq 1 ] && echo "  Nginx Proxy   : ${GREEN}http://$SERVER_IP:$PORT_PROXY${NC}"
 echo ""
 echo -e "${CYAN}🚀 Next Steps:${NC}"
 echo "  1. Open browser: http://$SERVER_IP:6080"
 echo "  2. Click 'Connect' button"
 echo "  3. XFCE desktop should appear in 10-20 seconds"
-echo "  4. Check Applications menu for VS Code & Chrome"
 echo ""
 echo -e "${CYAN}📖 Useful Commands:${NC}"
-echo "  # Check service status"
-echo "  sudo systemctl status vps-gui"
+echo "  sudo systemctl status vps-gui        # Check service"
+echo "  sudo journalctl -u vps-gui -f        # View logs"
+echo "  sudo systemctl restart vps-gui       # Restart service"
+echo "  sudo bash check.sh $TARGET_USER      # Health check"
+echo "  sudo bash setpw.sh $TARGET_USER      # Set VNC password"
 echo ""
-echo "  # View logs"
-echo "  sudo journalctl -u vps-gui -n 50 -f"
-echo ""
-echo "  # Restart service"
-echo "  sudo systemctl restart vps-gui"
-echo ""
-echo "  # Full cleanup & reset"
-echo "  sudo bash cleanup.sh"
-echo ""
-echo "  # Nginx proxy management (if configured)"
-echo "  sudo systemctl status nginx"
-echo "  sudo systemctl restart nginx"
-echo ""
-echo "  # Run this script again for updates/fixes"
-echo "  sudo bash auto-install.sh $TARGET_USER yes"
-echo ""
-echo "  # Repository:"
-echo "  https://github.com/asepindrak/vps-gui-noVnc"
-echo ""
-echo ""
-echo -e "${YELLOW}💡 TIPS:${NC}"
-echo "  • Wait 10-20 seconds after first connect"
-echo "  • If desktop not showing, refresh browser (F5)"
 if [ "$USE_EXISTING_DISPLAY" = true ]; then
-    echo "  • Changes are visible on your local monitor (POP OS/Ubuntu Desktop mode)"
-    echo "  • You can also access remotely via: http://SERVER_IP:6080"
+    echo -e "${YELLOW}💡 EXISTING DISPLAY MODE TIPS:${NC}"
+    echo "  • Changes visible on your local monitor"
+    echo "  • If X11 access fails, run: xhost +SI:localuser:$TARGET_USER"
+    echo "  • Then: sudo systemctl restart vps-gui"
 else
-    echo "  • Use Ctrl+Alt+F2 to open terminal in XFCE"
-    echo "  • Desktop will auto-restart if you close it"
+    echo -e "${YELLOW}💡 VIRTUAL DISPLAY MODE TIPS:${NC}"
+    echo "  • Desktop runs in virtual framebuffer :1"
+    echo "  • Use Ctrl+Alt+F2 for terminal in XFCE"
 fi
-echo "  • Password was set during installation (or use: sudo bash setpw.sh)"
 echo ""
 echo -e "${NC}"
